@@ -433,7 +433,7 @@ pub async fn resize_window(window_id: u64, width: i32, height: i32) -> Result<St
         &resize_window_dispatch(window_id, target),
     )
     .await?;
-    // An exact resize re-centres the window, so `at` changes too; the caller
+    // An exact resize re-centers the window, so `at` changes too; the caller
     // sees the fresh geometry through the re-query, and only the size decides
     // whether the request landed.
     let after = wait_for_client(window_id, |client| client.size == Some(target_size)).await?;
@@ -544,7 +544,7 @@ fn resize_window_dispatch(window_id: u64, [width, height]: [i32; 2]) -> [String;
 
 /// Hyprland cannot give a tiled window an exact geometry: it drops a pixel
 /// move outright, and turns a pixel resize into a layout-split adjustment,
-/// which resizes the *neighbouring* windows instead of honouring the request.
+/// which resizes the *neighboring* windows instead of honoring the request.
 /// So both are refused here, before any dispatch runs, and a refusal leaves
 /// the layout untouched. The floating state is deliberately left alone: the
 /// caller decides whether to float the window, so the refusal names the tool
@@ -552,7 +552,7 @@ fn resize_window_dispatch(window_id: u64, [width, height]: [i32; 2]) -> [String;
 fn refuse_if_tiled(window_id: u64, client: &HyprlandClient, operation: &str) -> Result<()> {
     if client.floating == Some(false) {
         bail!(
-            "Window 0x{window_id:x} is tiled, so Hyprland cannot {operation} it to an exact geometry: a pixel move is ignored, and a pixel resize moves the layout split, resizing neighbouring windows instead. Nothing was dispatched and the layout is unchanged. Call set_window_floating with floating=true, retry, then set_window_floating with floating=false to tile it again."
+            "Window 0x{window_id:x} is tiled, so Hyprland cannot {operation} it to an exact geometry: a pixel move is ignored, and a pixel resize moves the layout split, resizing neighboring windows instead. Nothing was dispatched and the layout is unchanged. Call set_window_floating with floating=true, retry, then set_window_floating with floating=false to tile it again."
         );
     }
     Ok(())

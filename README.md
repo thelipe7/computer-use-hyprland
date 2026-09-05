@@ -69,7 +69,7 @@ input-backend problem.
 
 **Hyprland cannot give a tiled window an exact geometry.** `move_window` and
 `resize_window` refuse one without dispatching anything: a pixel move is
-ignored, and a pixel resize moves the layout split, resizing the neighbours
+ignored, and a pixel resize moves the layout split, resizing the neighbors
 instead. Call `set_window_floating` with `floating: true`, do the move or
 resize, then `floating: false` to put the layout back.
 
@@ -97,7 +97,7 @@ without `grim` on its `PATH`:
 systemctl --user restart xdg-desktop-portal-hyprland.service xdg-desktop-portal.service
 ```
 
-## Licence
+## License
 
 MIT. See [LICENSE](LICENSE); the upstream copyright notice is preserved there
-as the licence requires.
+as the license requires.

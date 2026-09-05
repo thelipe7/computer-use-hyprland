@@ -1222,7 +1222,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "scroll",
-        description = "Scroll an element in a direction by a number of pages. With element_index, an AT-SPI action named like \"scroll down\" for that direction is invoked first when the element exposes one; otherwise wheel events go to the element's centre. With a window target and no x/y/element_index, scrolls at the centre of the targeted window.",
+        description = "Scroll an element in a direction by a number of pages. With element_index, an AT-SPI action named like \"scroll down\" for that direction is invoked first when the element exposes one; otherwise wheel events go to the element's center. With a window target and no x/y/element_index, scrolls at the center of the targeted window.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1283,7 +1283,7 @@ impl ComputerUseLinux {
                 // A window target without a point would otherwise scroll
                 // whatever happens to sit under the pointer: focusing does not
                 // move the cursor, and the wheel path never repositions it.
-                // Default to the centre of the resolved target window.
+                // Default to the center of the resolved target window.
                 let Some(focus) = focus.as_ref() else {
                     return Json(action_failure(
                         "scroll",
@@ -1398,7 +1398,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "drag",
-        description = "Drag from one point to another. Each end is either a desktop coordinate pair, a window-relative pair (with a window target and `relative: true`), or the centre of an element (`start_element_index`/`end_element_index` from the latest get_app_state tree). A window target is raised and focused first, so the drag lands on the intended app rather than whatever is stacked on top at that pixel. The result reports the desktop point each end resolved to.",
+        description = "Drag from one point to another. Each end is either a desktop coordinate pair, a window-relative pair (with a window target and `relative: true`), or the center of an element (`start_element_index`/`end_element_index` from the latest get_app_state tree). A window target is raised and focused first, so the drag lands on the intended app rather than whatever is stacked on top at that pixel. The result reports the desktop point each end resolved to.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1826,7 +1826,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "resize_window",
-        description = "Resize a window to a new frame width/height in desktop pixels. Useful to fit a window fully on-screen. Dispatched through hyprctl, so it needs a floating window: on a tiled one a pixel resize moves the layout split and resizes the neighbours instead, so the call is refused before anything is dispatched. Call set_window_floating with floating=true first, then put the layout back with floating=false.",
+        description = "Resize a window to a new frame width/height in desktop pixels. Useful to fit a window fully on-screen. Dispatched through hyprctl, so it needs a floating window: on a tiled one a pixel resize moves the layout split and resizes the neighbors instead, so the call is refused before anything is dispatched. Call set_window_floating with floating=true first, then put the layout back with floating=false.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2843,11 +2843,11 @@ struct DragParams {
     end_x: Option<i32>,
     #[serde(default)]
     end_y: Option<i32>,
-    /// Drag from the centre of this element, from the latest get_app_state
+    /// Drag from the center of this element, from the latest get_app_state
     /// tree, instead of `start_x`/`start_y`.
     #[serde(default)]
     start_element_index: Option<u32>,
-    /// Drag to the centre of this element instead of `end_x`/`end_y`.
+    /// Drag to the center of this element instead of `end_x`/`end_y`.
     #[serde(default)]
     end_element_index: Option<u32>,
     /// Modifier keys held around the drag (ctrl/alt/shift/meta, the press_key
@@ -3711,7 +3711,7 @@ impl ComputerUseLinux {
         })
     }
 
-    /// Centre of a cached node's bounds in desktop coordinates, with the
+    /// Center of a cached node's bounds in desktop coordinates, with the
     /// window-origin offset applied when the tree reported window-relative
     /// bounds.
     fn desktop_center_for_node(
@@ -4714,7 +4714,7 @@ fn apply_window_relative_click_coordinates(
     Ok(())
 }
 
-/// Point a window-targeted scroll at the centre of the resolved window when
+/// Point a window-targeted scroll at the center of the resolved window when
 /// the caller supplied no coordinates. Without this the wheel events land on
 /// whatever is under the current pointer position.
 fn apply_window_center_scroll_point(
@@ -6094,7 +6094,7 @@ mod tests {
     }
 
     #[test]
-    fn drag_endpoint_resolves_an_element_index_to_its_centre() {
+    fn drag_endpoint_resolves_an_element_index_to_its_center() {
         let backend = ComputerUseLinux::default();
         backend.cache_nodes(&[node(
             7,

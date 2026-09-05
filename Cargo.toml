@@ -42,7 +42,7 @@ style = { level = "warn", priority = -1 }
 # warnings, and about sixty of them are numeric casts between the compositor's
 # coordinates and the image crate's, where the right answer is a decision per
 # site rather than a sweep. Turning it on is worth its own branch, with the
-# desktop available to verify the ones that change behaviour. The rest of this
+# desktop available to verify the ones that change behavior. The rest of this
 # table is what could be turned on today without one.
 #
 # Individually chosen from `restriction` and `nursery`, which are menus rather
@@ -84,20 +84,20 @@ anyhow = "1.0.104"
 # AccessibilityConnection. We deliberately never use P2P routing,
 # so depend on atspi-connection directly with p2p off.
 atspi = { version = "0.30.0", default-features = false, features = [
-  "proxies",
-  "wrappers",
-  "tokio",
+    "proxies",
+    "wrappers",
+    "tokio",
 ] }
 atspi-connection = { version = "0.14.0", default-features = false, features = [
-  "wrappers",
+    "wrappers",
 ] }
 base64 = "0.23.1"
 evdev = "0.13.2"
 futures-util = "0.3.34"
 getrandom = "0.4.3"
 image = { version = "0.25", default-features = false, features = [
-  "jpeg",
-  "png",
+    "jpeg",
+    "png",
 ] }
 libc = "0.2"
 rmcp = { version = "3.2.0", features = ["transport-io"] }
@@ -106,12 +106,12 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 tokio = { version = "1.53.1", features = [
-  "io-util",
-  "macros",
-  "process",
-  "rt",
-  "sync",
-  "time",
+    "io-util",
+    "macros",
+    "process",
+    "rt",
+    "sync",
+    "time",
 ] }
 zbus = "5.19.0"
 

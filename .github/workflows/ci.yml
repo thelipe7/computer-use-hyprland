@@ -58,7 +58,7 @@ jobs:
 
   # Runners have no Hyprland, no AT-SPI bus and no uinput, so CI can only prove
   # the server builds and still serves the tool contract it promises. Desktop
-  # behaviour is verified by hand on the maintainer's machine.
+  # behavior is verified by hand on the maintainer's machine.
   mcp-safety:
     name: MCP safety contract
     runs-on: ubuntu-latest

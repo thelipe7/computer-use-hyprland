@@ -1,0 +1,15 @@
+# How TOML is formatted, checked in CI. Nothing else formats it, and the
+# manifest is where the lint policy, the profiles and the dependency versions
+# are all written down.
+#
+# taplo walks every *.toml under the tree and knows nothing of gitignore.
+# Whatever appears under target/ was rendered by cargo, never written by
+# anybody here.
+exclude = ["target/**"]
+
+[formatting]
+# A one-line list stops being readable at the third entry, and every list here
+# is edited and diffed one line at a time.
+array_auto_collapse = false
+# Four, matching the Rust beside it. taplo's own default is two.
+indent_string = "    "

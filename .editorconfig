@@ -1,0 +1,19 @@
+# rustfmt and taplo govern Rust and TOML; this is for everything else an
+# editor opens — YAML, Markdown, Python, shell — and for the editor itself,
+# before any formatter has run.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{yml,yaml}]
+indent_size = 2
+
+[*.md]
+# Two trailing spaces are Markdown's own line-break syntax.
+trim_trailing_whitespace = false

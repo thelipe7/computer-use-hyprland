@@ -1,5 +1,5 @@
 //! The binary. Everything it does lives in the library beside it; this
-//! file picks the allocator and the runtime flavour and gets out of the
+//! file picks the allocator and the runtime flavor and gets out of the
 //! way.
 
 #[cfg(target_os = "linux")]

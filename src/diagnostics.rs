@@ -246,7 +246,7 @@ fn capability_map(
 /// environment.
 ///
 /// Every write below is `unsafe` in edition 2024, because setting a variable
-/// while another thread reads one is undefined behaviour. `run_cli_from_env`
+/// while another thread reads one is undefined behavior. `run_cli_from_env`
 /// calls this first, before the runtime exists and before anything is
 /// spawned, and that is the call that does the work: the tool paths that call
 /// it again find each variable already set and write nothing.

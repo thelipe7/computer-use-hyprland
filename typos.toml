@@ -1,0 +1,26 @@
+# `typos` walks a directory the way a search tool does, not the way a linter
+# does: hidden paths are skipped unless it is told otherwise, and here that
+# would leave the spelling gate blind to the whole of `.github/` — every
+# workflow, the issue templates, the pull request template — and to this file
+# and `.editorconfig` beside it.
+#
+# `.git/` then has to be named, because it is hidden rather than gitignored:
+# its reflog quotes the subject of every commit ever written here, corrected
+# ones included, and its objects are compressed binary that decodes into false
+# positives.
+[files]
+ignore-hidden = false
+extend-exclude = [".git/", "target/"]
+
+# Which English this project writes. `typos` carries the British-to-American
+# mapping and applies none of it until it is told a variant.
+[default]
+locale = "en-us"
+
+[default.extend-words]
+# `ba` is a D-Bus type signature (byte array), not a typo, and it appears in
+# the AT-SPI property reads.
+ba = "ba"
+# `ix`/`iy` are the intersection rectangle's coordinates in the occlusion
+# arithmetic, not a misspelling of `it`.
+iy = "iy"

@@ -475,7 +475,7 @@ pub(crate) fn cli_error(stderr: &[u8]) -> Option<String> {
     let detail = String::from_utf8_lossy(stderr).trim().to_string();
     let normalized = detail.to_ascii_lowercase();
     [
-        "unrecognised option",
+        "unrecognized option",
         "unrecognized option",
         "unknown option",
         "invalid option",
@@ -823,8 +823,8 @@ esac
     #[test]
     fn recognizes_cli_errors_even_when_exit_status_is_success() {
         assert_eq!(
-            cli_error(b"error: unrecognised option '--absolute'\n"),
-            Some("error: unrecognised option '--absolute'".to_string())
+            cli_error(b"error: unrecognized option '--absolute'\n"),
+            Some("error: unrecognized option '--absolute'".to_string())
         );
     }
 
