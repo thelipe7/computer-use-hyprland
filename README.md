@@ -161,12 +161,11 @@ without `grim` on its `PATH`:
 systemctl --user restart xdg-desktop-portal-hyprland.service xdg-desktop-portal.service
 ```
 
-`examples/atspi_probe.rs` prints the real error chain behind a failed AT-SPI
-connection, which is the one diagnosis `doctor` reduces to a yes or a no:
-
-```bash
-cargo run --example atspi_probe
-```
+`doctor` opens one real connection to the accessibility bus rather than only
+reading the properties that say it is configured, and prints the whole error
+chain in `accessibility.at_spi_connect` when it fails. The two questions have
+different answers: a single peer that refuses an interface query can abort the
+connection while every property still reads back `true`.
 
 ## Contributing
 

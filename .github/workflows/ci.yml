@@ -71,8 +71,8 @@ jobs:
 
       - uses: ./.github/actions/rust
 
-      # `--all-targets` for the example, which nothing else compiles, and a
-      # second run for the doctests, which `--all-targets` excludes.
+      # `--all-targets` for the binary and the benches a future change adds,
+      # and a second run for the doctests, which `--all-targets` excludes.
       - run: cargo test --locked --all-targets
       - run: cargo test --locked --doc
 
