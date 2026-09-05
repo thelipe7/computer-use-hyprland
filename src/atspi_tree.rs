@@ -4,6 +4,7 @@ use atspi::{
     proxy::{
         accessible::{AccessibleProxy, ObjectRefExt},
         proxy_ext::ProxyExt,
+        text::TextProxy,
     },
     CoordType, ObjectRef, ObjectRefOwned, StateSet,
 };
@@ -81,6 +82,12 @@ pub struct AccessibilityText {
     pub content: Option<String>,
     pub truncated: bool,
     pub selections: Vec<AccessibilityTextSelection>,
+    /// Why `selections` is empty when the selection count could not be read
+    /// at all, which is a different answer from "nothing is selected".
+    /// Serialized only when present, so a large tree does not carry one null
+    /// per text node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -102,6 +109,19 @@ pub enum ValueSetInvocation {
     EditableText,
 }
 
+/// One app's accessibility tree and the processes whose AT-SPI roots it was
+/// walked from.
+///
+/// The pids are the only link between a tree and the compositor window it was
+/// drawn in: an accesskit app reports window-relative bounds, so a caller that
+/// named no window target still needs a window to offset them by, and the
+/// snapshot's own process is what finds one.
+#[derive(Debug, Clone, Default)]
+pub struct TreeSnapshot {
+    pub nodes: Vec<AccessibilityNode>,
+    pub root_pids: Vec<u32>,
+}
+
 const MAX_TEXT_READBACK_CHARS: i32 = 4096;
 const MAX_TEXT_SELECTIONS: i32 = 8;
 const DEFAULT_SNAPSHOT_MAX_NODES: usize = 1_000;
@@ -113,6 +133,9 @@ const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_DISCOVERY_ROOTS: usize = 256;
 const ROOT_MATCH_CHILD_LIMIT: usize = 8;
 const MAX_DISCOVERY_CHILD_READS: usize = MAX_DISCOVERY_ROOTS * ROOT_MATCH_CHILD_LIMIT;
+/// Above this many selected roots the snapshot spans too many apps for its
+/// pids to name one window, so they are not looked up at all.
+const MAX_SNAPSHOT_ROOT_PIDS: usize = 8;
 
 fn snapshot_child_read_budgets(max_nodes: usize) -> (usize, usize, usize) {
     (MAX_DISCOVERY_ROOTS, MAX_DISCOVERY_CHILD_READS, max_nodes)
@@ -251,7 +274,7 @@ pub async fn snapshot_tree(
     target_pid: Option<u32>,
     max_nodes: usize,
     max_depth: u32,
-) -> Result<Vec<AccessibilityNode>> {
+) -> Result<TreeSnapshot> {
     let (max_nodes, max_depth) = snapshot_limits(Some(max_nodes), Some(max_depth));
     timeout(
         SNAPSHOT_TIMEOUT,
@@ -271,7 +294,7 @@ async fn snapshot_tree_inner(
     target_pid: Option<u32>,
     max_nodes: usize,
     max_depth: u32,
-) -> Result<Vec<AccessibilityNode>> {
+) -> Result<TreeSnapshot> {
     let conn = connect().await?;
     // App discovery is bounded independently so a tiny requested tree still
     // finds a target registered after the first accessibility root.
@@ -287,6 +310,7 @@ async fn snapshot_tree_inner(
         &mut remaining_filter_reads,
     )
     .await;
+    let root_pids = root_pids(conn.connection(), &selected_roots).await;
     let mut nodes = Vec::new();
     let mut traversal = BoundedTraversal::new(max_nodes);
 
@@ -320,7 +344,31 @@ async fn snapshot_tree_inner(
         );
     }
 
-    Ok(nodes)
+    Ok(TreeSnapshot { nodes, root_pids })
+}
+
+/// The distinct processes owning the roots a snapshot walked.
+///
+/// Bounded by [`MAX_SNAPSHOT_ROOT_PIDS`]: a snapshot that selected more roots
+/// than that spans the whole desktop rather than one app, and no single window
+/// could be its own, so the lookup is skipped instead of costing one bus call
+/// per registered app.
+async fn root_pids(conn: &zbus::Connection, roots: &[ObjectRefOwned]) -> Vec<u32> {
+    if roots.is_empty() || roots.len() > MAX_SNAPSHOT_ROOT_PIDS {
+        return Vec::new();
+    }
+    let Ok(dbus) = DBusProxy::new(conn).await else {
+        return Vec::new();
+    };
+    let mut pids: Vec<u32> = Vec::new();
+    for object_ref in roots {
+        if let Some(pid) = object_ref_pid(Some(&dbus), object_ref).await {
+            if !pids.contains(&pid) {
+                pids.push(pid);
+            }
+        }
+    }
+    pids
 }
 
 /// Compact description of the AT-SPI element that currently holds keyboard
@@ -827,11 +875,7 @@ async fn text_from_proxies(
     } else {
         None
     };
-    let selection_count = text
-        .get_nselections()
-        .await
-        .unwrap_or_default()
-        .clamp(0, MAX_TEXT_SELECTIONS);
+    let (selection_count, selection_error) = selection_read_plan(text_selection_count(&text).await);
     let mut selections = Vec::new();
     for index in 0..selection_count {
         if let Ok((start_offset, end_offset)) = text.get_selection(index).await {
@@ -848,7 +892,43 @@ async fn text_from_proxies(
         content,
         truncated: character_count > MAX_TEXT_READBACK_CHARS,
         selections,
+        selection_error,
     })
+}
+
+/// `org.a11y.atspi.Text.GetNSelections`, called by its real name.
+///
+/// `TextProxy::get_nselections` cannot be used. zbus derives the D-Bus method
+/// name from the Rust one by pascal-casing it, so `get_nselections` is sent as
+/// `GetNselections` while the interface — and every server implementing it,
+/// including accesskit's, which names its method `get_n_selections` — spells
+/// it `GetNSelections`. The call therefore fails with
+/// `org.freedesktop.DBus.Error.UnknownMethod` on every app, which is why the
+/// count used to read as zero. Measured against atspi-proxies 0.13.0 and zbus
+/// 5.15.0 on 2026-09-05; drop this helper if atspi renames the method.
+/// `get_selection` needs no such treatment: it pascal-cases correctly.
+async fn text_selection_count(text: &TextProxy<'_>) -> zbus::Result<i32> {
+    text.inner().call("GetNSelections", &()).await
+}
+
+/// How many selections to read back, and the error to report when the count
+/// could not be read at all.
+///
+/// A count that failed to read is not the same answer as "nothing is
+/// selected", so the error travels with the text instead of being swallowed
+/// into an empty list.
+fn selection_read_plan<E: std::fmt::Display>(
+    count: std::result::Result<i32, E>,
+) -> (i32, Option<String>) {
+    match count {
+        Ok(count) => (count.clamp(0, MAX_TEXT_SELECTIONS), None),
+        Err(error) => (
+            0,
+            Some(format!(
+                "failed to read the AT-SPI selection count: {error}"
+            )),
+        ),
+    }
 }
 
 async fn supports_editable_text(proxies: Option<&atspi::proxy::proxy_ext::Proxies<'_>>) -> bool {
@@ -946,6 +1026,28 @@ mod tests {
 
         assert_eq!(name, ":1.42");
         assert_eq!(path, "/org/a11y/atspi/accessible/7");
+    }
+
+    #[test]
+    fn a_selection_count_is_clamped_to_the_readback_limit() {
+        assert_eq!(selection_read_plan(Ok::<_, String>(0)), (0, None));
+        assert_eq!(selection_read_plan(Ok::<_, String>(1)), (1, None));
+        assert_eq!(selection_read_plan(Ok::<_, String>(-3)), (0, None));
+        assert_eq!(
+            selection_read_plan(Ok::<_, String>(i32::MAX)),
+            (MAX_TEXT_SELECTIONS, None)
+        );
+    }
+
+    #[test]
+    fn an_unreadable_selection_count_is_reported_rather_than_read_as_none() {
+        let (count, error) = selection_read_plan(Err::<i32, _>("Unknown method 'GetNselections'"));
+
+        assert_eq!(count, 0);
+        assert_eq!(
+            error.as_deref(),
+            Some("failed to read the AT-SPI selection count: Unknown method 'GetNselections'")
+        );
     }
 
     #[test]

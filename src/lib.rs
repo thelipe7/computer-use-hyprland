@@ -26,7 +26,7 @@ pub mod atspi_tree {
     };
     pub use crate::atspi_tree_impl::{
         snapshot_tree, AccessibilityAction, AccessibilityNode, AccessibilityText,
-        AccessibilityTextSelection, AccessibilityValue, Bounds,
+        AccessibilityTextSelection, AccessibilityValue, Bounds, TreeSnapshot,
     };
 }
 

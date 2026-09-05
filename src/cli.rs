@@ -36,7 +36,7 @@ pub(crate) async fn run_from_env() -> Result<()> {
         Some("state") => {
             let app_name_or_bundle_identifier = std::env::args().nth(2);
             let (max_nodes, max_depth) = atspi_tree::snapshot_limits(None, None);
-            let nodes = atspi_tree::snapshot_tree(
+            let snapshot = atspi_tree::snapshot_tree(
                 app_name_or_bundle_identifier.as_deref(),
                 None,
                 max_nodes,
@@ -45,7 +45,7 @@ pub(crate) async fn run_from_env() -> Result<()> {
             .await?;
             println!(
                 "{}",
-                serde_json::to_string_pretty(&nodes)
+                serde_json::to_string_pretty(&snapshot.nodes)
                     .context("failed to serialize accessibility tree")?
             );
             Ok(())

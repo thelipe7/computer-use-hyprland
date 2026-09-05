@@ -72,14 +72,16 @@ const SHELL_MAX_CWD_BYTES: usize = 4096;
 const SHELL_MAX_ENV_ENTRIES: usize = 64;
 const SHELL_MAX_ENV_BYTES: usize = 64 * 1024;
 const SHELL_RESPONSE_STREAM_BYTES: usize = 512 * 1024;
+/// Tail of the note explaining a point that could not be moved onto the
+/// desktop, and how to make it resolvable.
+const UNANCHORED_BOUNDS_NOTE: &str = "but the tree's bounds are window-relative and no window origin was available, so they were not offset to desktop coordinates and the pointer will miss. Call get_app_state again with pid or window_id so the tree is tied to its window.";
 
 #[derive(Clone, Default)]
 pub struct ComputerUseLinux {
     last_nodes: Arc<Mutex<Vec<AccessibilityNode>>>,
-    /// Offset that turns the cached nodes' bounds into desktop coordinates
-    /// when the tree reported them relative to its window. See
-    /// [`window_relative_bounds_offset`].
-    node_bounds_offset: Arc<Mutex<Option<BoundsOffset>>>,
+    /// How the cached nodes' bounds map onto desktop coordinates. See
+    /// [`bounds_are_window_relative`].
+    node_bounds: Arc<Mutex<CachedBounds>>,
     portal_pointer_session: Arc<Mutex<Option<PortalPointerSession>>>,
     portal_keyboard_session: Arc<Mutex<Option<PortalKeyboardSession>>>,
     /// Lazily-created uinput absolute pointer (preferred coordinate backend).
@@ -368,28 +370,44 @@ impl ComputerUseLinux {
         } else {
             (None, None)
         };
-        let (accessibility_tree, accessibility_tree_raw_count, accessibility_error) =
+        let (accessibility_tree, accessibility_tree_raw_count, root_pids, accessibility_error) =
             if diagnostics.readiness.can_build_accessibility_tree {
                 let target_pid = window_context.as_ref().and_then(|window| window.pid);
                 match snapshot_tree(app_filter.as_deref(), target_pid, max_nodes, max_depth).await {
-                    Ok(nodes) => {
-                        let raw_count = nodes.len();
-                        (compact_accessibility_tree(nodes), raw_count, None)
+                    Ok(snapshot) => {
+                        let raw_count = snapshot.nodes.len();
+                        (
+                            compact_accessibility_tree(snapshot.nodes),
+                            raw_count,
+                            snapshot.root_pids,
+                            None,
+                        )
                     }
-                    Err(error) => (Vec::new(), 0, Some(format!("{error:#}"))),
+                    Err(error) => (Vec::new(), 0, Vec::new(), Some(format!("{error:#}"))),
                 }
             } else {
                 (
                     Vec::new(),
                     0,
+                    Vec::new(),
                     Some(
                         "GNOME accessibility is disabled; call setup_accessibility first."
                             .to_string(),
                     ),
                 )
             };
+        // A tree whose bounds follow its window needs a window even when the
+        // caller named none, or every element point stays window-relative and
+        // the pointer misses; the snapshot's own process supplies one.
+        let bounds_window = match window_context.clone() {
+            Some(window) => Some(window),
+            None => {
+                self.window_for_untargeted_tree(&accessibility_tree, &root_pids)
+                    .await
+            }
+        };
         if accessibility_error.is_none() {
-            self.cache_tree(&accessibility_tree, window_context.as_ref());
+            self.cache_tree(&accessibility_tree, bounds_window.as_ref());
         } else {
             self.clear_cached_nodes();
         }
@@ -422,6 +440,11 @@ impl ComputerUseLinux {
             ));
         } else if let Some(error) = &window_error {
             message.push_str(&format!(" Window target resolution failed: {error}"));
+        } else if let Some(window) = &bounds_window {
+            message.push_str(&format!(
+                " No window target was given; the tree's window-relative bounds were tied to window_id {} through the app's own pid.",
+                window.window_id
+            ));
         }
 
         // Full diagnostics are huge (portal/process dumps); emit them only on
@@ -926,8 +949,8 @@ impl ComputerUseLinux {
                     .and_then(|(x, y)| coordinate_map.portal_point(x, y));
             }
         }
-        let bounds_offset = self.current_bounds_offset().await;
-        let target = match self.resolve_click_target(&params, bounds_offset) {
+        let bounds = self.current_bounds().await;
+        let target = match self.resolve_click_target(&params, bounds.offset()) {
             Ok(target) => target,
             Err(message) => {
                 return Json(ActionOutput {
@@ -1057,11 +1080,16 @@ impl ComputerUseLinux {
         let Some((x, y)) = point else {
             unreachable!("an element click target carries an action or a point");
         };
-        notes.push(match bounds_offset {
-            Some((dx, dy)) => format!(
+        notes.push(match (bounds_offset, &bounds) {
+            (Some((dx, dy)), _) => format!(
                 "element_index {element_index} resolved to desktop point ({x}, {y}): the tree's window-relative bounds were offset by the window origin ({dx}, {dy})."
             ),
-            None => format!("element_index {element_index} resolved to desktop point ({x}, {y})."),
+            (None, CachedBounds::Unanchored) => {
+                format!("element_index {element_index} resolved to point ({x}, {y}), {UNANCHORED_BOUNDS_NOTE}")
+            }
+            (None, _) => {
+                format!("element_index {element_index} resolved to desktop point ({x}, {y}).")
+            }
         });
         let output = self
             .click_at_point_with_modifiers(
@@ -1591,12 +1619,12 @@ impl ComputerUseLinux {
                 )),
             }
         }
-        let bounds_offset = self.current_bounds_offset().await;
+        let bounds = self.current_bounds().await;
         let target_point = match self.resolve_optional_target_point(
             params.x,
             params.y,
             params.element_index,
-            bounds_offset,
+            bounds.offset(),
         ) {
             Ok(point) => point,
             Err(message) => {
@@ -1625,10 +1653,15 @@ impl ComputerUseLinux {
                 });
             }
         };
-        let off_screen_note = match target_point {
-            Some((x, y)) => self.off_screen_note_for_point(x, y).await,
-            None => None,
-        };
+        let mut point_notes = Vec::new();
+        if let Some((x, y)) = target_point {
+            if params.element_index.is_some() && bounds == CachedBounds::Unanchored {
+                point_notes.push(format!(
+                    "The scroll point ({x}, {y}) came from cached bounds, {UNANCHORED_BOUNDS_NOTE}"
+                ));
+            }
+            point_notes.extend(self.off_screen_note_for_point(x, y).await);
+        }
         if let Some(session) = self.cached_portal_pointer_session() {
             let mapped_target = match (portal_target_point, target_point) {
                 (Some(point), _) => Some(Some(point)),
@@ -1639,7 +1672,7 @@ impl ComputerUseLinux {
                 self.clear_portal_pointer_session(&session);
                 return Json(with_notes(
                     portal_coordinate_error("scroll", received),
-                    off_screen_note.clone(),
+                    point_notes.clone(),
                 ));
             };
             match portal_scroll(&session, portal_target_point, direction, units).await {
@@ -1652,14 +1685,14 @@ impl ComputerUseLinux {
                             message: "Action sent through the remote desktop portal.".to_string(),
                             received,
                         },
-                        off_screen_note.clone(),
+                        point_notes.clone(),
                     ));
                 }
                 Err(error) => {
                     self.clear_portal_pointer_session(&session);
                     return Json(with_notes(
                         portal_action_error("scroll", error, received),
-                        off_screen_note.clone(),
+                        point_notes.clone(),
                     ));
                 }
             }
@@ -1675,7 +1708,7 @@ impl ComputerUseLinux {
                         self.clear_portal_pointer_session(&session);
                         return Json(with_notes(
                             portal_coordinate_error("scroll", received),
-                            off_screen_note.clone(),
+                            point_notes.clone(),
                         ));
                     };
                     match portal_scroll(&session, portal_target_point, direction, units).await {
@@ -1689,14 +1722,14 @@ impl ComputerUseLinux {
                                         .to_string(),
                                     received,
                                 },
-                                off_screen_note.clone(),
+                                point_notes.clone(),
                             ));
                         }
                         Err(error) => {
                             self.clear_portal_pointer_session(&session);
                             return Json(with_notes(
                                 portal_action_error("scroll", error, received),
-                                off_screen_note.clone(),
+                                point_notes.clone(),
                             ));
                         }
                     }
@@ -1721,7 +1754,7 @@ impl ComputerUseLinux {
         })
         .await;
         let _input_guard = input_guard;
-        notes.extend(off_screen_note);
+        notes.extend(point_notes);
         Json(with_notes(action_result("scroll", result, received), notes))
     }
 
@@ -4063,17 +4096,22 @@ impl ComputerUseLinux {
                 .as_ref()
                 .and_then(|window| window.pid)
                 .or(params.pid);
-            let nodes = match snapshot_tree(app_filter.as_deref(), target_pid, max_nodes, max_depth)
-                .await
+            let snapshot = match snapshot_tree(
+                app_filter.as_deref(),
+                target_pid,
+                max_nodes,
+                max_depth,
+            )
+            .await
             {
-                Ok(nodes) => nodes,
+                Ok(snapshot) => snapshot,
                 Err(error) => {
                     probe.error = Some(format!("AT-SPI tree extraction failed: {error:#}"));
                     return probe;
                 }
             };
-            let raw_count = nodes.len();
-            let nodes = compact_accessibility_tree(nodes);
+            let raw_count = snapshot.nodes.len();
+            let nodes = compact_accessibility_tree(snapshot.nodes);
             let matches = nodes
                 .iter()
                 .filter(|node| node_matches_selector(node, selector))
@@ -4102,7 +4140,14 @@ impl ComputerUseLinux {
                 ));
                 return probe;
             };
-            self.cache_tree(&nodes, window_context.as_ref());
+            let bounds_window = match window_context.clone() {
+                Some(window) => Some(window),
+                None => {
+                    self.window_for_untargeted_tree(&nodes, &snapshot.root_pids)
+                        .await
+                }
+            };
+            self.cache_tree(&nodes, bounds_window.as_ref());
             probe.element = Some(element);
         }
 
@@ -4503,44 +4548,63 @@ impl ComputerUseLinux {
             cached.clear();
             cached.extend_from_slice(nodes);
         }
-        if let Ok(mut offset) = self.node_bounds_offset.lock() {
-            *offset = window.and_then(|window| {
-                window_relative_bounds_offset(nodes, window).map(|offset| BoundsOffset {
-                    window_id: window.window_id,
-                    offset,
-                })
-            });
+        if let Ok(mut bounds) = self.node_bounds.lock() {
+            *bounds = cached_bounds_for(nodes, window);
         }
+    }
+
+    /// The compositor window a tree fetched without a window target belongs
+    /// to, so its window-relative bounds can still be offset.
+    ///
+    /// Only asked when the bounds need it, because listing windows costs a
+    /// compositor round trip on every `get_app_state`.
+    async fn window_for_untargeted_tree(
+        &self,
+        nodes: &[AccessibilityNode],
+        root_pids: &[u32],
+    ) -> Option<WindowInfo> {
+        if root_pids.is_empty() || !bounds_are_window_relative(nodes) {
+            return None;
+        }
+        let windows = list_windows().await.ok()?;
+        sole_window_for_pids(&windows, root_pids).cloned()
     }
 
     fn clear_cached_nodes(&self) {
         if let Ok(mut cached) = self.last_nodes.lock() {
             cached.clear();
         }
-        if let Ok(mut offset) = self.node_bounds_offset.lock() {
-            *offset = None;
+        if let Ok(mut bounds) = self.node_bounds.lock() {
+            *bounds = CachedBounds::Desktop;
         }
     }
 
     #[cfg(test)]
     fn cached_bounds_offset(&self) -> Option<(i32, i32)> {
-        self.node_bounds_offset
+        self.node_bounds
             .lock()
             .ok()
-            .and_then(|offset| offset.as_ref().map(|offset| offset.offset))
+            .and_then(|bounds| bounds.offset())
     }
 
-    /// The offset to apply to cached node bounds right now: the window's
+    /// How the cached node bounds map onto the desktop right now: the window's
     /// current origin from the compositor when the window can be found (it
     /// may have moved since the tree was cached), the cached offset otherwise.
-    async fn current_bounds_offset(&self) -> Option<(i32, i32)> {
+    async fn current_bounds(&self) -> CachedBounds {
         let cached = self
-            .node_bounds_offset
+            .node_bounds
             .lock()
             .ok()
-            .and_then(|offset| offset.clone())?;
+            .map(|bounds| bounds.clone())
+            .unwrap_or_default();
+        let CachedBounds::Window(cached) = cached else {
+            return cached;
+        };
         let windows = list_windows().await.unwrap_or_default();
-        Some(fresh_bounds_offset(&cached, &windows))
+        CachedBounds::Window(BoundsOffset {
+            offset: fresh_bounds_offset(&cached, &windows),
+            ..cached
+        })
     }
 
     /// Centre of a cached node's bounds in desktop coordinates, with the
@@ -5066,8 +5130,8 @@ fn click_action(actions: &[AccessibilityAction]) -> Option<&AccessibilityAction>
         .find(|action| action.name.trim().eq_ignore_ascii_case("click"))
 }
 
-/// Offset that maps the tree's node bounds onto the desktop, or `None` when
-/// the bounds already are desktop coordinates.
+/// True when the tree reports its node bounds relative to its own window
+/// rather than to the desktop.
 ///
 /// The tree reads extents with `CoordType::Screen`, but an accesskit-backed
 /// app (GPUI, winit) answers that relative to the window: accesskit's AT-SPI
@@ -5077,27 +5141,93 @@ fn click_action(actions: &[AccessibilityAction]) -> Option<&AccessibilityAction>
 /// The signature is a top-level frame that reports no desktop origin, either
 /// extents starting at (0, 0) or no bounds at all (GPUI's Frame answers
 /// `GetExtents` with nothing usable), while the compositor places the window
-/// elsewhere. The compositor backend is the only source of the real origin, so
-/// its window bounds supply the offset. A frame that reports a real non-zero
-/// origin (GTK, Qt) gets no offset. A window at the desktop origin yields
-/// `(0, 0)`, which still records that the tree follows the window.
+/// elsewhere. A frame that reports a real non-zero origin (GTK, Qt) is already
+/// desktop-relative, and so is a tree with no top-level frame at all, which
+/// gives nothing to judge by.
+fn bounds_are_window_relative(nodes: &[AccessibilityNode]) -> bool {
+    nodes
+        .iter()
+        .filter(|node| is_top_level_frame_role(&node.role))
+        .min_by_key(|node| node.depth)
+        .is_some_and(|frame| {
+            !frame
+                .bounds
+                .as_ref()
+                .is_some_and(|bounds| bounds.x != 0 || bounds.y != 0)
+        })
+}
+
+/// Offset that maps a window-relative tree's node bounds onto the desktop.
+///
+/// The compositor backend is the only source of the real origin, so the
+/// window's bounds supply it. A window at the desktop origin yields `(0, 0)`,
+/// which still records that the tree follows the window.
 fn window_relative_bounds_offset(
     nodes: &[AccessibilityNode],
     window: &WindowInfo,
 ) -> Option<(i32, i32)> {
-    let frame = nodes
-        .iter()
-        .filter(|node| is_top_level_frame_role(&node.role))
-        .min_by_key(|node| node.depth)?;
-    if frame
-        .bounds
-        .as_ref()
-        .is_some_and(|bounds| bounds.x != 0 || bounds.y != 0)
-    {
+    if !bounds_are_window_relative(nodes) {
         return None;
     }
     let window_bounds = window.bounds.as_ref()?;
     Some((window_bounds.x?, window_bounds.y?))
+}
+
+/// How a cached tree's node bounds map onto desktop coordinates.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum CachedBounds {
+    /// The bounds already are desktop coordinates, or no tree is cached.
+    #[default]
+    Desktop,
+    /// The bounds follow a window, whose origin offsets them.
+    Window(BoundsOffset),
+    /// The bounds follow a window that could not be identified, so no offset
+    /// can be applied and element points stay window-relative.
+    Unanchored,
+}
+
+impl CachedBounds {
+    /// The offset to add to a cached node's bounds, or `None` when they need
+    /// none or none can be known.
+    fn offset(&self) -> Option<(i32, i32)> {
+        match self {
+            Self::Window(bounds) => Some(bounds.offset),
+            Self::Desktop | Self::Unanchored => None,
+        }
+    }
+}
+
+/// How a freshly snapshotted tree's bounds map onto the desktop, given the
+/// window it was tied to (if any).
+fn cached_bounds_for(nodes: &[AccessibilityNode], window: Option<&WindowInfo>) -> CachedBounds {
+    if !bounds_are_window_relative(nodes) {
+        return CachedBounds::Desktop;
+    }
+    match window.and_then(|window| {
+        window_relative_bounds_offset(nodes, window).map(|offset| BoundsOffset {
+            window_id: window.window_id,
+            offset,
+        })
+    }) {
+        Some(bounds) => CachedBounds::Window(bounds),
+        None => CachedBounds::Unanchored,
+    }
+}
+
+/// The single window belonging to one of `pids`, or `None` when none or
+/// several do.
+///
+/// This is how a tree fetched without a window target still finds its window:
+/// the AT-SPI roots it walked name a process, and a process with exactly one
+/// window leaves no room to pick the wrong one. Several windows would, so they
+/// are refused rather than guessed at — an offset by the wrong window moves
+/// every click.
+fn sole_window_for_pids<'a>(windows: &'a [WindowInfo], pids: &[u32]) -> Option<&'a WindowInfo> {
+    let mut matches = windows
+        .iter()
+        .filter(|window| window.pid.is_some_and(|pid| pids.contains(&pid)));
+    let window = matches.next()?;
+    matches.next().is_none().then_some(window)
 }
 
 /// The window a window-relative tree belongs to and the origin it had when
@@ -7963,7 +8093,9 @@ mod tests {
         ];
         let backend = ComputerUseLinux::default();
         backend.cache_tree(&nodes, Some(&placed_window(Some(965), Some(48))));
-        let cached = backend.node_bounds_offset.lock().unwrap().clone().unwrap();
+        let CachedBounds::Window(cached) = backend.node_bounds.lock().unwrap().clone() else {
+            panic!("expected window-relative cached bounds");
+        };
         assert_eq!(cached.window_id, 1);
         assert_eq!(cached.offset, (965, 48));
 
@@ -8001,6 +8133,132 @@ mod tests {
                 .unwrap(),
             Some((1285, 582))
         );
+    }
+
+    #[test]
+    fn an_untargeted_tree_is_anchored_by_the_app_pid_when_one_window_matches() {
+        let nodes = [
+            frame_node(
+                0,
+                Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 900,
+                    height: 700,
+                },
+            ),
+            node_with_actions(
+                1,
+                Some(Bounds {
+                    x: 8,
+                    y: 151,
+                    width: 191,
+                    height: 24,
+                }),
+                vec![click_action()],
+            ),
+        ];
+        let window = placed_window(Some(965), Some(48));
+        let other_app = window_info(2, Some("Files"), Some("nautilus"), None, Some(77));
+
+        assert_eq!(
+            sole_window_for_pids(&[other_app.clone(), window.clone()], &[4242])
+                .map(|window| window.window_id),
+            Some(1)
+        );
+
+        let backend = ComputerUseLinux::default();
+        backend.cache_tree(&nodes, sole_window_for_pids(&[other_app, window], &[4242]));
+
+        assert_eq!(backend.cached_bounds_offset(), Some((965, 48)));
+        assert_eq!(
+            backend
+                .resolve_optional_target_point(None, None, Some(1), backend.cached_bounds_offset())
+                .unwrap(),
+            Some((965 + 103, 48 + 163))
+        );
+    }
+
+    #[test]
+    fn a_pid_owning_no_window_or_several_anchors_nothing() {
+        let first = placed_window(Some(965), Some(48));
+        let mut second = placed_window(Some(100), Some(100));
+        second.window_id = 2;
+        let unknown_pid = window_info(3, Some("Files"), Some("nautilus"), None, None);
+
+        let window_id = |window: Option<&WindowInfo>| window.map(|window| window.window_id);
+
+        assert_eq!(window_id(sole_window_for_pids(&[], &[4242])), None);
+        assert_eq!(
+            window_id(sole_window_for_pids(std::slice::from_ref(&first), &[])),
+            None
+        );
+        assert_eq!(
+            window_id(sole_window_for_pids(&[first.clone(), unknown_pid], &[4242])),
+            Some(1)
+        );
+        assert_eq!(
+            window_id(sole_window_for_pids(&[first, second], &[4242])),
+            None
+        );
+    }
+
+    #[test]
+    fn an_unanchored_window_relative_tree_is_recorded_as_such() {
+        let window_relative = [
+            frame_node(
+                0,
+                Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 900,
+                    height: 700,
+                },
+            ),
+            node(
+                1,
+                Some(Bounds {
+                    x: 8,
+                    y: 151,
+                    width: 191,
+                    height: 24,
+                }),
+            ),
+        ];
+
+        assert_eq!(
+            cached_bounds_for(&window_relative, None),
+            CachedBounds::Unanchored
+        );
+        assert_eq!(
+            cached_bounds_for(&window_relative, Some(&placed_window(None, None))),
+            CachedBounds::Unanchored
+        );
+        assert_eq!(
+            cached_bounds_for(&window_relative, Some(&placed_window(Some(965), Some(48)))),
+            CachedBounds::Window(BoundsOffset {
+                window_id: 1,
+                offset: (965, 48),
+            })
+        );
+
+        // A tree that already reports desktop coordinates is never unanchored,
+        // window or no window: it needs no offset.
+        let desktop_relative = [frame_node(
+            0,
+            Bounds {
+                x: 965,
+                y: 48,
+                width: 900,
+                height: 700,
+            },
+        )];
+        assert_eq!(
+            cached_bounds_for(&desktop_relative, None),
+            CachedBounds::Desktop
+        );
+        assert_eq!(CachedBounds::Unanchored.offset(), None);
+        assert_eq!(CachedBounds::default(), CachedBounds::Desktop);
     }
 
     #[test]
