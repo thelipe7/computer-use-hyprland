@@ -1,0 +1,43 @@
+name: Rust
+description: The toolchain, the build cache and any cargo tools a job needs.
+
+# One place, because every workflow needs the same three steps, and a setup
+# that drifts between them is a job that passes for a reason none of the
+# others share.
+#
+# No system package is installed. The old workflow installed libdbus-1-dev on
+# every job; nothing links against it — zbus speaks the protocol in Rust and
+# `ldd` on the built binary names no libdbus. The first dependency that does
+# need one is installed here rather than in an argument every workflow
+# repeats: a native dependency is a property of the project, not of the job
+# that happened to hit the link error.
+
+inputs:
+  tools:
+    description: Cargo tools to install, as taiki-e/install-action names them.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # Installs the toolchain pinned in rust-toolchain.toml. Before the cache,
+    # which keys on the Rust version it finds.
+    - run: rustup toolchain install
+      shell: bash
+
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      with:
+        # Bump to walk away from a poisoned lineage: this action never
+        # overwrites a key it restored in full, so a bad entry persists until
+        # the prefix changes.
+        prefix-key: v1-rust
+        # Only the default branch writes. A pull request's cache is scoped to
+        # its own ref, so nothing else can read what it saves; it only spends
+        # the budget and evicts entries every other run lives on.
+        save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+    - if: inputs.tools != ''
+      uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
+      with:
+        tool: ${{ inputs.tools }}

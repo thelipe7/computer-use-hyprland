@@ -1,0 +1,14 @@
+# The pinning policy this repository holds its workflows to, written down
+# rather than inherited. Every action is pinned to a commit, `actions/*`
+# included. zizmor has defaulted to exactly this since v1.20.0, and the
+# default changed once already; a gate whose verdict depends on which release
+# ran is not a gate.
+#
+# A deliberate finding anywhere else is silenced at the line it is on, with a
+# `# zizmor: ignore[audit-name]` comment carrying its reason. Every workflow
+# here is hand-written, so there is nothing that cannot take one.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        "*": hash-pin

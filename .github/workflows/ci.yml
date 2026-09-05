@@ -1,9 +1,8 @@
-name: ci
+name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
+  push:
     branches: [main]
 
 permissions:
@@ -11,61 +10,86 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+  # Full debug info is the largest thing a CI build writes to disk and nothing
+  # here reads it: no debugger attaches to a runner, and a backtrace needs line
+  # tables only. Here rather than in Cargo.toml, so a developer's own builds
+  # keep what a debugger needs.
+  RUSTFLAGS: -C debuginfo=line-tables-only
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Three jobs, split by the build tree each needs rather than by the question
+# each asks. `lint` and `contract` share nothing with `test`, which builds the
+# test harness; clippy reuses what `cargo check` wrote, so the checks that can
+# share a tree do.
+#
+# What CI cannot answer is the desktop: a runner has no Hyprland, no AT-SPI
+# bus and no uinput. So the contract job proves the server still speaks the
+# tool surface it promises, and behavior on a real desktop is verified by
+# hand against a running Hyprland. CONTRIBUTING says what that involves.
 jobs:
-  fmt:
-    name: cargo fmt
+  lint:
+    name: Formatting, lints and dependency policy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          components: rustfmt
-      - run: cargo fmt --all -- --check
+          persist-credentials: false
 
-  clippy:
-    name: cargo clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: ./.github/actions/rust
         with:
-          components: clippy
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
-      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+          # `typos` carries a version, unlike the tools beside it: a new
+          # release of a spelling linter can fail prose nobody touched, where a
+          # new cargo-deny only reads today's advisories. Bumping it is a
+          # commit, so the release that changed the answer has a name.
+          tools: cargo-deny,taplo,typos@1.50.0,zizmor
+
+      - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: taplo fmt --check
+      - run: typos
+      - run: cargo deny --locked check
+
+      # The workflows are code too, and the one thing no other job reads.
+      - name: Audit the workflows
+        env:
+          # zizmor's online audits — a known-vulnerable action version, a
+          # repository that can be taken over — need an API token. Without one
+          # it silently runs the offline half.
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor .github/
 
   test:
-    name: cargo test
+    name: Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
-      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/rust
+
+      # `--all-targets` for the example, which nothing else compiles, and a
+      # second run for the doctests, which `--all-targets` excludes.
       - run: cargo test --locked --all-targets
+      - run: cargo test --locked --doc
 
-  supply-chain:
-    name: cargo audit
+  contract:
+    name: MCP tool contract
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
-      - run: cargo install cargo-audit --locked
-      - run: cargo audit --deny warnings
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-  # Runners have no Hyprland, no AT-SPI bus and no uinput, so CI can only prove
-  # the server builds and still serves the tool contract it promises. Desktop
-  # behavior is verified by hand on the maintainer's machine.
-  mcp-safety:
-    name: MCP safety contract
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
-      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: ./.github/actions/rust
+
       - run: cargo build --locked
-      - run: scripts/mcp_safety_check.py --binary target/debug/computer-use-hyprland
+
+      # Spawns the binary, does the MCP handshake and asserts the exact tool
+      # set, that `run_shell` stays opt-in, that every window-targeted tool
+      # exposes the same nine selectors, and that the exported schemas are
+      # well-formed. This is the only thing in CI that runs the server.
+      - run: python3 scripts/mcp_safety_check.py --binary target/debug/computer-use-hyprland
