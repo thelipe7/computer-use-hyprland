@@ -1,20 +1,20 @@
 use crate::atspi_tree::{
-    element_states, focused_element_summary, grab_focus, is_stale_object_error,
+    AccessibilityAction, AccessibilityNode, AccessibleAppSummary, Bounds, FocusedElementSummary,
+    ValueSetInvocation, element_states, focused_element_summary, grab_focus, is_stale_object_error,
     list_accessible_apps, perform_action as invoke_accessibility_action, set_element_value,
-    snapshot_limits, snapshot_tree, AccessibilityAction, AccessibilityNode, AccessibleAppSummary,
-    Bounds, FocusedElementSummary, ValueSetInvocation,
+    snapshot_limits, snapshot_tree,
 };
 use crate::diagnostics::{
-    doctor_report, setup_accessibility_report, user_id, DoctorReport, SetupReport,
+    DoctorReport, SetupReport, doctor_report, setup_accessibility_report, user_id,
 };
 use crate::screenshot::{
-    capture_screenshot_raw, prepare_screenshot_payload, RawScreenshotCapture, ScreenshotCapture,
-    ScreenshotOutputFormat, ScreenshotPayloadOptions,
+    RawScreenshotCapture, ScreenshotCapture, ScreenshotOutputFormat, ScreenshotPayloadOptions,
+    capture_screenshot_raw, prepare_screenshot_payload,
 };
 use crate::windowing::registry;
 use crate::windowing::{
-    focus_window_target, focused_window, list_windows, resolve_window_target,
-    window_permission_hint, WindowFocusResult, WindowInfo, WindowOcclusion, WindowTarget,
+    WindowFocusResult, WindowInfo, WindowOcclusion, WindowTarget, focus_window_target,
+    focused_window, list_windows, resolve_window_target, window_permission_hint,
 };
 use crate::ydotool;
 
@@ -22,10 +22,11 @@ use crate::ydotool;
 const UNKNOWN_BACKEND: &str = "unavailable";
 use anyhow::Result;
 use rmcp::{
+    ErrorData, ServerHandler, ServiceExt,
     handler::server::wrapper::{Json, Parameters},
     model::{CallToolResult, ContentBlock},
     schemars::JsonSchema,
-    tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt,
+    tool, tool_handler, tool_router,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1434,14 +1435,14 @@ impl ComputerUseLinux {
                 ));
             }
         };
-        if !held_modifiers.is_empty() {
-            if let Err(message) = run_ydotool(&modifier_hold_args(&held_modifiers, true)).await {
-                return Json(action_failure(
-                    "drag",
-                    format!("Could not hold the modifiers through ydotool: {message}"),
-                    Some(serde_json::json!(params)),
-                ));
-            }
+        if !held_modifiers.is_empty()
+            && let Err(message) = run_ydotool(&modifier_hold_args(&held_modifiers, true)).await
+        {
+            return Json(action_failure(
+                "drag",
+                format!("Could not hold the modifiers through ydotool: {message}"),
+                Some(serde_json::json!(params)),
+            ));
         }
         let modifiers = params.modifiers.join("+");
         let output = self.drag_inner(params, start, end).await;
@@ -1686,9 +1687,13 @@ impl ComputerUseLinux {
         let Some(key_events) = key_sequence(key) else {
             return (
                 Some(input_guard),
-                action_failure("press_key", format!(
+                action_failure(
+                    "press_key",
+                    format!(
                         "Unsupported key {key:?}. Use names like Enter, Escape, Tab, ArrowLeft, Super, Ctrl+L, or a single US keyboard letter/digit."
-                    ), received),
+                    ),
+                    received,
+                ),
             );
         };
         // A chord holds its modifiers down across the key press; a bare key
@@ -2073,7 +2078,7 @@ async fn execute_shell(params: RunShellParams) -> RunShellOutput {
                 requested_cwd,
                 timeout_seconds,
                 "cwd is not a directory",
-            )
+            );
         }
         Err(error) => {
             return shell_error_output(
@@ -2081,7 +2086,7 @@ async fn execute_shell(params: RunShellParams) -> RunShellOutput {
                 requested_cwd,
                 timeout_seconds,
                 format!("failed to resolve cwd: {error}"),
-            )
+            );
         }
     };
     let cwd_display = cwd.display().to_string();
@@ -3074,14 +3079,12 @@ impl ComputerUseLinux {
             .or(params.target.pid);
         let candidates = accessibility_filter_candidates(window_context);
 
-        if let Some(target_pid) = target_pid {
-            if let Ok(apps) = list_accessible_apps(200).await {
-                if let Some(object_ref) =
-                    select_accessibility_object_ref(&apps, target_pid, &candidates)
-                {
-                    return Some(object_ref);
-                }
-            }
+        if let Some(target_pid) = target_pid
+            && let Ok(apps) = list_accessible_apps(200).await
+            && let Some(object_ref) =
+                select_accessibility_object_ref(&apps, target_pid, &candidates)
+        {
+            return Some(object_ref);
         }
 
         candidates.into_iter().next()
@@ -3472,10 +3475,10 @@ impl ComputerUseLinux {
                         .find(|window| window.window_id == window_id)
                 });
                 let mut message = message;
-                if let Some(bounds) = window.as_ref().and_then(|window| window.bounds.as_ref()) {
-                    if let Some(note) = self.off_screen_note_for_bounds(bounds).await {
-                        message = format!("{message} {note}");
-                    }
+                if let Some(bounds) = window.as_ref().and_then(|window| window.bounds.as_ref())
+                    && let Some(note) = self.off_screen_note_for_bounds(bounds).await
+                {
+                    message = format!("{message} {note}");
                 }
                 Json(WindowGeometryOutput {
                     ok: true,
@@ -3516,10 +3519,10 @@ impl ComputerUseLinux {
                 .as_ref()
                 .and_then(|window| window.bounds.as_ref())
                 .or(focus.requested_window.bounds.as_ref());
-            if let Some(bounds) = bounds {
-                if let Some(note) = self.off_screen_note_for_bounds(bounds).await {
-                    notes.push(note);
-                }
+            if let Some(bounds) = bounds
+                && let Some(note) = self.off_screen_note_for_bounds(bounds).await
+            {
+                notes.push(note);
             }
         }
         if let Some(note) = self.focused_element_feedback(focus, expects_editable).await {
@@ -3540,10 +3543,10 @@ impl ComputerUseLinux {
         // states after it has had a moment, or the previous state is reported.
         sleep(POST_ACTION_SETTLE).await;
         let mut notes = self.input_landing_notes(focus, false).await;
-        if let Some((object_ref, before)) = element {
-            if let Some(note) = element_states_note(object_ref, before).await {
-                notes.push(note);
-            }
+        if let Some((object_ref, before)) = element
+            && let Some(note) = element_states_note(object_ref, before).await
+        {
+            notes.push(note);
         }
         notes
     }
@@ -4540,17 +4543,17 @@ fn accessibility_filter_candidates(window_context: Option<&WindowInfo>) -> Vec<S
     push_candidate(&mut candidates, window.title.as_deref());
     push_candidate(&mut candidates, window.wm_class.as_deref());
 
-    if let Some(app_id) = trimmed_nonempty(window.app_id.as_deref()) {
-        if !app_id.starts_with("window:") {
-            push_candidate(&mut candidates, Some(app_id));
-            if let Some(stripped) = app_id.strip_suffix(".desktop") {
-                push_candidate(&mut candidates, Some(stripped));
-                let normalized = stripped.replace(['-', '_', '.'], " ");
-                push_candidate(&mut candidates, Some(normalized.as_str()));
-            } else {
-                let normalized = app_id.replace(['-', '_', '.'], " ");
-                push_candidate(&mut candidates, Some(normalized.as_str()));
-            }
+    if let Some(app_id) = trimmed_nonempty(window.app_id.as_deref())
+        && !app_id.starts_with("window:")
+    {
+        push_candidate(&mut candidates, Some(app_id));
+        if let Some(stripped) = app_id.strip_suffix(".desktop") {
+            push_candidate(&mut candidates, Some(stripped));
+            let normalized = stripped.replace(['-', '_', '.'], " ");
+            push_candidate(&mut candidates, Some(normalized.as_str()));
+        } else {
+            let normalized = app_id.replace(['-', '_', '.'], " ");
+            push_candidate(&mut candidates, Some(normalized.as_str()));
         }
     }
 
@@ -4822,18 +4825,18 @@ fn action_result_with_focus(
 }
 
 fn with_focus_context(mut output: ActionOutput, focus: Option<WindowFocusResult>) -> ActionOutput {
-    if output.ok {
-        if let Some(focus) = focus {
-            let verification = if focus.exact_window_focused {
-                "exact window-focus"
-            } else {
-                "app-level focus"
-            };
-            output.message = format!(
-                "{} Target window_id {} was focused with {verification} verification before input.",
-                output.message, focus.requested_window.window_id,
-            );
-        }
+    if output.ok
+        && let Some(focus) = focus
+    {
+        let verification = if focus.exact_window_focused {
+            "exact window-focus"
+        } else {
+            "app-level focus"
+        };
+        output.message = format!(
+            "{} Target window_id {} was focused with {verification} verification before input.",
+            output.message, focus.requested_window.window_id,
+        );
     }
     output
 }
@@ -5241,13 +5244,16 @@ fn ydotool_socket() -> Option<String> {
 }
 
 fn explicit_ydotool_socket() -> Option<String> {
-    if let Ok(socket) = env::var("YDOTOOL_SOCKET") {
-        let socket = socket.trim();
-        if !socket.is_empty() {
-            return Some(socket.to_string());
-        }
-    }
-    None
+    explicit_ydotool_socket_from(env::var("YDOTOOL_SOCKET").ok().as_deref())
+}
+
+/// The socket an explicit `YDOTOOL_SOCKET` names, or `None` when the variable
+/// is absent or blank. Split from the read so a test can state the value: the
+/// alternative is writing one into the process environment, which edition 2024
+/// makes `unsafe` because `cargo test` runs these on several threads.
+fn explicit_ydotool_socket_from(socket: Option<&str>) -> Option<String> {
+    let socket = socket?.trim();
+    (!socket.is_empty()).then(|| socket.to_string())
 }
 
 fn fallback_ydotool_socket_candidates() -> Vec<PathBuf> {
@@ -5296,10 +5302,10 @@ fn key_chord(key: &str) -> Option<(Vec<u16>, u16)> {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>();
     let (key_part, modifier_parts) = parts.split_last()?;
-    if modifier_parts.is_empty() {
-        if let Some(modifier) = modifier_keycode(key_part) {
-            return Some((Vec::new(), modifier));
-        }
+    if modifier_parts.is_empty()
+        && let Some(modifier) = modifier_keycode(key_part)
+    {
+        return Some((Vec::new(), modifier));
     }
     let mut modifiers = Vec::new();
     for part in modifier_parts {
@@ -5518,7 +5524,7 @@ fn looks_like_desktop_app(name: &str, command: &str) -> bool {
 mod tests {
     use super::*;
     use crate::atspi_tree::{AccessibilityAction, Bounds};
-    use crate::windowing::{WindowBounds, HYPRLAND_BACKEND};
+    use crate::windowing::{HYPRLAND_BACKEND, WindowBounds};
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -7087,18 +7093,22 @@ mod tests {
             region_crop_rect(&region, false, None, 1920, 1080).unwrap(),
             ((1900, 1070, 20, 10), (1900, 1070, 20, 10))
         );
-        assert!(region_crop_rect(&region, true, None, 1920, 1080)
-            .unwrap_err()
-            .contains("window target"));
+        assert!(
+            region_crop_rect(&region, true, None, 1920, 1080)
+                .unwrap_err()
+                .contains("window target")
+        );
         let outside = ScreenshotRegion {
             x: 5000,
             y: 0,
             width: 10,
             height: 10,
         };
-        assert!(region_crop_rect(&outside, false, None, 1920, 1080)
-            .unwrap_err()
-            .contains("outside"));
+        assert!(
+            region_crop_rect(&outside, false, None, 1920, 1080)
+                .unwrap_err()
+                .contains("outside")
+        );
         let empty = ScreenshotRegion {
             x: 0,
             y: 0,
@@ -7204,9 +7214,11 @@ mod tests {
             .unwrap();
         assert_eq!(object_ref, ":1.4/org/a11y/atspi/accessible/4");
         assert_eq!(action.index, 1);
-        assert!(backend
-            .cached_scroll_action(4, ScrollDirection::Up)
-            .is_none());
+        assert!(
+            backend
+                .cached_scroll_action(4, ScrollDirection::Up)
+                .is_none()
+        );
     }
 
     #[test]
@@ -7607,18 +7619,15 @@ mod tests {
 
     #[test]
     fn explicit_ydotool_socket_is_used_without_connectability_probe() {
-        let key = "YDOTOOL_SOCKET";
-        let original = std::env::var_os(key);
-        std::env::set_var(key, " /does/not/exist.sock ");
-
-        let selected = explicit_ydotool_socket();
-
-        match original {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
-        }
+        let selected = explicit_ydotool_socket_from(Some(" /does/not/exist.sock "));
 
         assert_eq!(selected.as_deref(), Some("/does/not/exist.sock"));
+    }
+
+    #[test]
+    fn a_blank_or_absent_ydotool_socket_is_no_socket() {
+        assert_eq!(explicit_ydotool_socket_from(Some("   ")), None);
+        assert_eq!(explicit_ydotool_socket_from(None), None);
     }
 
     #[test]
@@ -8005,9 +8014,11 @@ mod tests {
     fn shell_audit_digest_is_stable_and_does_not_echo_command_text() {
         let digest = shell_command_sha256("printf secret");
         assert_eq!(digest.len(), 64);
-        assert!(digest
-            .chars()
-            .all(|character| character.is_ascii_hexdigit()));
+        assert!(
+            digest
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        );
         assert!(!digest.contains("secret"));
         assert_eq!(digest, shell_command_sha256("printf secret"));
     }

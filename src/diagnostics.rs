@@ -240,28 +240,43 @@ fn capability_map(
     }
 }
 
+/// Fill in the desktop variables a bus client needs when this process was
+/// started without them: from a systemd user service, from a shell that
+/// inherited nothing, or from an MCP client that spawns with a bare
+/// environment.
+///
+/// Every write below is `unsafe` in edition 2024, because setting a variable
+/// while another thread reads one is undefined behaviour. `run_cli_from_env`
+/// calls this first, before the runtime exists and before anything is
+/// spawned, and that is the call that does the work: the tool paths that call
+/// it again find each variable already set and write nothing.
 pub fn hydrate_session_bus_env() {
     hydrate_common_command_path();
     hydrate_desktop_env_from_process_tree();
     hydrate_desktop_env_from_systemd_user();
 
-    if env_var("XDG_RUNTIME_DIR").is_none() {
-        if let Some(runtime) = xdg_runtime_dir() {
-            if runtime.exists() {
-                env::set_var("XDG_RUNTIME_DIR", runtime);
-            }
-        }
+    if env_var("XDG_RUNTIME_DIR").is_none()
+        && let Some(runtime) = xdg_runtime_dir()
+        && runtime.exists()
+    {
+        // SAFETY: see `hydrate_session_bus_env`, which every one of these runs
+        // under: the write that matters happens before anything is spawned.
+        unsafe { env::set_var("XDG_RUNTIME_DIR", runtime) };
     }
 
-    if env_var("DBUS_SESSION_BUS_ADDRESS").is_none() {
-        if let Some(runtime) = xdg_runtime_dir() {
-            let bus = runtime.join("bus");
-            if bus.exists() {
+    if env_var("DBUS_SESSION_BUS_ADDRESS").is_none()
+        && let Some(runtime) = xdg_runtime_dir()
+    {
+        let bus = runtime.join("bus");
+        if bus.exists() {
+            // SAFETY: see `hydrate_session_bus_env`, which every one of these runs
+            // under: the write that matters happens before anything is spawned.
+            unsafe {
                 env::set_var(
                     "DBUS_SESSION_BUS_ADDRESS",
                     format!("unix:path={}", bus.display()),
-                );
-            }
+                )
+            };
         }
     }
 }
@@ -282,7 +297,10 @@ fn hydrate_common_command_path() {
         }
     }
     if let Ok(path) = env::join_paths(entries) {
-        env::set_var("PATH", path);
+        // SAFETY: the same promise as the rest of the hydration, stated on
+        // `hydrate_session_bus_env`. Unlike the writes there, this one has no
+        // "already set" guard and repeats on every later call.
+        unsafe { env::set_var("PATH", path) };
     }
 }
 
@@ -316,7 +334,9 @@ fn hydrate_desktop_env_from_map(process_env: &HashMap<String, String>) {
         .filter_map(|key| env_var(key).map(|value| ((*key).to_string(), value)))
         .collect();
     for (key, value) in desktop_env_hydration_updates(&current_env, process_env) {
-        env::set_var(key, value);
+        // SAFETY: see `hydrate_session_bus_env`. The updates are computed
+        // against the current environment, so a second call produces none.
+        unsafe { env::set_var(key, value) };
     }
 }
 
@@ -375,11 +395,11 @@ fn desktop_process_environments() -> Vec<HashMap<String, String>> {
         pid = parent_pid(&current_pid.to_string());
     }
 
-    if !visited_pids.contains(&1) && process_owner_matches_current_user(1) {
-        if let Some(process_env) = read_process_environ(1).filter(process_env_has_graphical_display)
-        {
-            environments.push(process_env);
-        }
+    if !visited_pids.contains(&1)
+        && process_owner_matches_current_user(1)
+        && let Some(process_env) = read_process_environ(1).filter(process_env_has_graphical_display)
+    {
+        environments.push(process_env);
     }
 
     environments
@@ -1093,9 +1113,11 @@ mod tests {
         let updates = desktop_env_hydration_updates(&current_env, &host_env);
 
         assert!(!updates.iter().any(|(key, _)| *key == "WAYLAND_DISPLAY"));
-        assert!(updates
-            .iter()
-            .any(|(key, value)| { *key == "XDG_CURRENT_DESKTOP" && value == "ubuntu:GNOME" }));
+        assert!(
+            updates
+                .iter()
+                .any(|(key, value)| { *key == "XDG_CURRENT_DESKTOP" && value == "ubuntu:GNOME" })
+        );
     }
 
     #[test]
@@ -1105,9 +1127,11 @@ mod tests {
 
         let updates = desktop_env_hydration_updates(&current_env, &host_env);
 
-        assert!(updates
-            .iter()
-            .any(|(key, value)| *key == "WAYLAND_DISPLAY" && value == "wayland-0"));
+        assert!(
+            updates
+                .iter()
+                .any(|(key, value)| *key == "WAYLAND_DISPLAY" && value == "wayland-0")
+        );
     }
 
     #[test]
@@ -1202,13 +1226,17 @@ mod tests {
 
         assert!(readiness.can_query_windows);
         assert!(!readiness.can_focus_windows);
-        assert!(readiness
-            .recommended_next_step
-            .contains("exact-focus window backend"));
-        assert!(readiness
-            .blockers
-            .iter()
-            .any(|blocker| blocker.contains("Exact window activation")));
+        assert!(
+            readiness
+                .recommended_next_step
+                .contains("exact-focus window backend")
+        );
+        assert!(
+            readiness
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("Exact window activation"))
+        );
     }
 
     #[test]
@@ -1221,13 +1249,17 @@ mod tests {
         let readiness = readiness_report(&platform, &accessibility, &windowing, &input);
 
         assert!(readiness.blockers.is_empty());
-        assert!(readiness
-            .recommended_next_step
-            .contains("AT-SPI tree support"));
+        assert!(
+            readiness
+                .recommended_next_step
+                .contains("AT-SPI tree support")
+        );
         assert!(readiness.recommended_next_step.contains("window targeting"));
-        assert!(!readiness
-            .recommended_next_step
-            .contains("GNOME window targeting"));
+        assert!(
+            !readiness
+                .recommended_next_step
+                .contains("GNOME window targeting")
+        );
     }
 
     #[test]
@@ -1264,10 +1296,12 @@ mod tests {
         let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
         let readiness = readiness_report(&platform, &accessibility, &windowing, &input);
 
-        assert!(capabilities
-            .input
-            .iter()
-            .any(|backend| backend == "ydotool"));
+        assert!(
+            capabilities
+                .input
+                .iter()
+                .any(|backend| backend == "ydotool")
+        );
         assert!(readiness.can_send_development_input);
     }
 
@@ -1286,13 +1320,17 @@ mod tests {
         let readiness = readiness_report(&platform, &accessibility, &windowing, &input);
 
         assert!(!readiness.can_send_development_input);
-        assert!(readiness
-            .blockers
-            .iter()
-            .any(|blocker| blocker.contains("absolute pointer input")));
-        assert!(readiness
-            .recommended_next_step
-            .contains("keyboard-capable input backend"));
+        assert!(
+            readiness
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("absolute pointer input"))
+        );
+        assert!(
+            readiness
+                .recommended_next_step
+                .contains("keyboard-capable input backend")
+        );
     }
 
     #[test]
@@ -1310,13 +1348,17 @@ mod tests {
         let readiness = readiness_report(&platform, &accessibility, &windowing, &input);
 
         assert!(!readiness.can_send_development_input);
-        assert!(readiness
-            .recommended_next_step
-            .contains("Enable a keyboard-capable input backend"));
-        assert!(readiness
-            .blockers
-            .iter()
-            .any(|blocker| blocker.contains("Development keyboard input is unavailable")));
+        assert!(
+            readiness
+                .recommended_next_step
+                .contains("Enable a keyboard-capable input backend")
+        );
+        assert!(
+            readiness
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("Development keyboard input is unavailable"))
+        );
     }
 
     #[test]
@@ -1335,10 +1377,12 @@ mod tests {
         let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
         let readiness = readiness_report(&platform, &accessibility, &windowing, &input);
 
-        assert!(!capabilities
-            .input
-            .iter()
-            .any(|backend| backend == "ydotool"));
+        assert!(
+            !capabilities
+                .input
+                .iter()
+                .any(|backend| backend == "ydotool")
+        );
         assert!(!readiness.can_send_development_input);
     }
 

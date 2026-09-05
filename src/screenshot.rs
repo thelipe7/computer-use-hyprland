@@ -1,6 +1,6 @@
 use crate::diagnostics::hydrate_session_bus_env;
-use anyhow::{bail, Context, Result};
-use base64::{engine::general_purpose::STANDARD, Engine};
+use anyhow::{Context, Result, bail};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
@@ -14,9 +14,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use zbus::{
+    MatchRule, MessageStream, Proxy,
     message::{Message, Type as MessageType},
     zvariant::{OwnedObjectPath, OwnedValue, Value},
-    MatchRule, MessageStream, Proxy,
 };
 
 const PORTAL_REQUEST_INTERFACE: &str = "org.freedesktop.portal.Request";
@@ -437,14 +437,14 @@ fn percent_decode(value: &str) -> String {
     let mut index = 0;
 
     while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(hex) = std::str::from_utf8(&bytes[index + 1..index + 3]) {
-                if let Ok(byte) = u8::from_str_radix(hex, 16) {
-                    decoded.push(byte);
-                    index += 3;
-                    continue;
-                }
-            }
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let Ok(hex) = std::str::from_utf8(&bytes[index + 1..index + 3])
+            && let Ok(byte) = u8::from_str_radix(hex, 16)
+        {
+            decoded.push(byte);
+            index += 3;
+            continue;
         }
 
         decoded.push(bytes[index]);
