@@ -600,6 +600,27 @@ async fn open_accessible<'r>(
     object_ref.as_accessible_proxy(conn.connection()).await
 }
 
+/// Open the accessibility bus and read the registry, which is the first thing
+/// every tree read does. Answers with how many applications the registry
+/// lists.
+///
+/// This is the only check that says the bus can be *reached*. Reading the
+/// `org.a11y.Status` properties says it is *configured*, which is a different
+/// question with a different answer: a single peer that refuses an interface
+/// query can abort the whole connection while every property still reads back
+/// true.
+pub(crate) async fn probe_connection() -> Result<usize> {
+    /// Enough children to prove the registry answers, and few enough that a
+    /// desktop full of applications does not make the probe the slow part of
+    /// `doctor`.
+    const PROBE_CHILD_READS: usize = 8;
+
+    let conn = connect().await?;
+    let mut remaining_child_reads = PROBE_CHILD_READS;
+    let roots = registry_children(&conn, PROBE_CHILD_READS, &mut remaining_child_reads).await?;
+    Ok(roots.len())
+}
+
 async fn registry_children(
     conn: &AccessibilityConnection,
     limit: usize,

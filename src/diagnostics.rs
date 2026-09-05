@@ -1,3 +1,4 @@
+use crate::atspi_tree::probe_connection;
 use crate::windowing::registry::{self, HYPRLAND_BACKEND};
 use crate::ydotool;
 use schemars::JsonSchema;
@@ -10,6 +11,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::Once,
+    time::Duration,
 };
 
 const DESKTOP_ENV_KEYS: &[&str] = &[
@@ -90,6 +92,9 @@ pub struct PortalReport {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct AccessibilityReport {
     pub at_spi_bus: Check,
+    /// One real connection to the bus, which is the only check here that says
+    /// the tree can be reached rather than that it is configured.
+    pub at_spi_connect: Check,
     pub toolkit_accessibility: Check,
     pub at_spi_enabled: Check,
     pub screen_reader_enabled: Check,
@@ -163,12 +168,43 @@ impl Check {
     }
 }
 
-pub fn doctor_report() -> DoctorReport {
+/// How long a connection probe may take before `doctor` calls it a failure.
+/// A bus that has not answered in this long is one no tool call would wait
+/// for either.
+const ACCESSIBILITY_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Open the accessibility bus once and say what happened, with the whole error
+/// chain when it did not.
+pub async fn accessibility_connect_check() -> Check {
+    match tokio::time::timeout(ACCESSIBILITY_CONNECT_TIMEOUT, probe_connection()).await {
+        Ok(Ok(applications)) => Check::ok(format!(
+            "connected; the AT-SPI registry lists {applications} applications"
+        )),
+        Ok(Err(error)) => Check::fail(format!("{error:#}")),
+        Err(_) => Check::fail(format!(
+            "no answer from the AT-SPI bus within {} seconds",
+            ACCESSIBILITY_CONNECT_TIMEOUT.as_secs()
+        )),
+    }
+}
+
+/// The whole report. Everything in it shells out or reads a file except the
+/// one check that opens a connection, which is why this is the async half and
+/// [`doctor_report_with`] is the blocking one.
+pub async fn doctor_report() -> DoctorReport {
+    let connect = accessibility_connect_check().await;
+    tokio::task::spawn_blocking(move || doctor_report_with(connect))
+        .await
+        .expect("doctor report task panicked")
+}
+
+/// The report, given the connection probe's verdict.
+pub fn doctor_report_with(connect: Check) -> DoctorReport {
     hydrate_session_bus_env();
 
     let platform = platform_report();
     let portals = portal_report();
-    let accessibility = accessibility_report();
+    let accessibility = accessibility_report(connect);
     let windowing = windowing_report();
     let input = input_report();
     let readiness = readiness_report(&platform, &accessibility, &windowing, &input);
@@ -507,41 +543,48 @@ fn parse_line_environment(bytes: &[u8]) -> HashMap<String, String> {
         .collect()
 }
 
-pub fn setup_accessibility_report() -> SetupReport {
+/// Turn accessibility on, through the bus property first and the GTK setting
+/// second. Blocking: both are commands.
+fn enable_accessibility() -> Check {
+    let atspi_status = command_check_with_session_bus(
+        "busctl",
+        &[
+            "--user",
+            "set-property",
+            "org.a11y.Bus",
+            "/org/a11y/bus",
+            "org.a11y.Status",
+            "IsEnabled",
+            "b",
+            "true",
+        ],
+    );
+    if atspi_status.ok {
+        return atspi_status;
+    }
+    command_check_with_session_bus(
+        "gsettings",
+        &[
+            "set",
+            "org.gnome.desktop.interface",
+            "toolkit-accessibility",
+            "true",
+        ],
+    )
+}
+
+pub async fn setup_accessibility_report() -> SetupReport {
     hydrate_session_bus_env();
 
-    let before = doctor_report();
+    let before = doctor_report().await;
     let accessibility_command = if can_build_accessibility_tree(&before.accessibility) {
         Check::ok("AT-SPI accessibility is already enabled")
     } else {
-        let atspi_status = command_check_with_session_bus(
-            "busctl",
-            &[
-                "--user",
-                "set-property",
-                "org.a11y.Bus",
-                "/org/a11y/bus",
-                "org.a11y.Status",
-                "IsEnabled",
-                "b",
-                "true",
-            ],
-        );
-        if atspi_status.ok {
-            atspi_status
-        } else {
-            command_check_with_session_bus(
-                "gsettings",
-                &[
-                    "set",
-                    "org.gnome.desktop.interface",
-                    "toolkit-accessibility",
-                    "true",
-                ],
-            )
-        }
+        tokio::task::spawn_blocking(enable_accessibility)
+            .await
+            .expect("accessibility enable task panicked")
     };
-    let after = doctor_report();
+    let after = doctor_report().await;
     let before_ready = before.readiness.can_build_accessibility_tree;
     let after_ready = after.readiness.can_build_accessibility_tree;
     let changed_accessibility = !before_ready && after_ready;
@@ -589,9 +632,10 @@ fn portal_report() -> PortalReport {
     }
 }
 
-fn accessibility_report() -> AccessibilityReport {
+fn accessibility_report(at_spi_connect: Check) -> AccessibilityReport {
     AccessibilityReport {
         at_spi_bus: atspi_bus_address_check(),
+        at_spi_connect,
         toolkit_accessibility: command_check_with_session_bus(
             "gsettings",
             &[
@@ -672,7 +716,15 @@ fn readiness_report(
     let can_focus_windows = windowing.can_focus_windows;
     let can_send_development_input = can_send_development_input(platform, input);
 
-    if !can_build_accessibility_tree {
+    // Two causes, two fixes. A bus this process could not reach is not one a
+    // gsettings key turns on, and saying so sends the reader to the wrong
+    // place: the detail of the failed connect is what they need.
+    if !accessibility.at_spi_connect.ok {
+        blockers.push(format!(
+            "Could not connect to the AT-SPI bus, so no accessibility tree can be read: {}",
+            accessibility.at_spi_connect.detail
+        ));
+    } else if !can_build_accessibility_tree {
         blockers.push(
             "AT-SPI accessibility is disabled; enable org.a11y.Status IsEnabled or org.gnome.desktop.interface toolkit-accessibility for tree extraction."
                 .to_string(),
@@ -736,8 +788,12 @@ fn can_send_development_input(platform: &PlatformReport, input: &InputReport) ->
         || input.ydotool.ok && input.ydotool_socket.ok
 }
 
+/// Both halves, because either one alone is a guess. A connection that
+/// succeeds proves the bus is reachable and says nothing about whether
+/// applications export anything to it; `toolkit-accessibility` says they do
+/// and nothing about whether this process can reach them.
 fn can_build_accessibility_tree(accessibility: &AccessibilityReport) -> bool {
-    accessibility.at_spi_bus.ok
+    accessibility.at_spi_connect.ok
         && (check_detail_contains_true(&accessibility.at_spi_enabled)
             || check_detail_contains_true(&accessibility.toolkit_accessibility))
 }
@@ -1024,6 +1080,7 @@ mod tests {
     ) -> AccessibilityReport {
         AccessibilityReport {
             at_spi_bus,
+            at_spi_connect: Check::ok("connected; the AT-SPI registry lists 6 applications"),
             toolkit_accessibility,
             at_spi_enabled: Check::fail("(<false>,)"),
             screen_reader_enabled: Check::fail("(<false>,)"),
@@ -1070,8 +1127,27 @@ mod tests {
     }
 
     #[test]
-    fn accessibility_tree_requires_reachable_at_spi_bus() {
-        let report = accessibility_report(Check::fail("permission denied"), Check::ok("true"));
+    fn accessibility_tree_requires_a_bus_this_process_can_connect_to() {
+        let mut report = accessibility_report(
+            Check::ok("('unix:path=/run/user/1000/at-spi/bus',)"),
+            Check::ok("true"),
+        );
+        report.at_spi_connect = Check::fail("failed to connect to AT-SPI bus: Connection refused");
+
+        assert!(!can_build_accessibility_tree(&report));
+    }
+
+    /// The case the properties cannot see: every one of them says yes and the
+    /// connection still dies. That is what the probe is for.
+    #[test]
+    fn a_configured_bus_that_refuses_a_connection_is_not_a_buildable_tree() {
+        let mut report = accessibility_report(
+            Check::ok("('unix:path=/run/user/1000/at-spi/bus',)"),
+            Check::ok("true"),
+        );
+        report.at_spi_enabled = Check::ok("(true,)");
+        report.at_spi_connect =
+            Check::fail("failed to connect to AT-SPI bus: peer refused GetInterfaces");
 
         assert!(!can_build_accessibility_tree(&report));
     }
@@ -1093,8 +1169,14 @@ mod tests {
         let windowing = windowing_report(false, false);
         let input = input_report(false);
 
+        let mut unreachable = accessibility_report(
+            Check::ok("('unix:path=/run/user/1000/at-spi/bus',)"),
+            Check::ok("true"),
+        );
+        unreachable.at_spi_connect = Check::fail("failed to connect to AT-SPI bus");
+
         for accessibility in [
-            accessibility_report(Check::fail("permission denied"), Check::ok("true")),
+            unreachable,
             accessibility_report(
                 Check::ok("('unix:path=/run/user/1000/at-spi/bus',)"),
                 Check::ok("false"),
@@ -1322,6 +1404,37 @@ mod tests {
             !readiness
                 .recommended_next_step
                 .contains("GNOME window targeting")
+        );
+    }
+
+    /// A bus nobody could reach is not a setting anybody can turn on, and the
+    /// blocker has to say which of the two it is.
+    #[test]
+    fn an_unreachable_bus_is_blamed_on_the_connection_rather_than_on_a_setting() {
+        let platform = platform_report();
+        let mut accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        accessibility.at_spi_connect =
+            Check::fail("failed to connect to AT-SPI bus: Connection refused");
+        let windowing = windowing_report(true, true);
+        let input = input_report(true);
+
+        let readiness = readiness_report(&platform, &accessibility, &windowing, &input);
+
+        assert!(
+            readiness
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("Connection refused")),
+            "the blocker should carry the connection's own error: {:?}",
+            readiness.blockers
+        );
+        assert!(
+            !readiness
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("toolkit-accessibility")),
+            "nothing here is fixed by a gsettings key: {:?}",
+            readiness.blockers
         );
     }
 

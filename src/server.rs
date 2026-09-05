@@ -147,11 +147,7 @@ impl ComputerUseLinux {
         )
     )]
     async fn doctor(&self) -> Json<DoctorReport> {
-        Json(
-            tokio::task::spawn_blocking(doctor_report)
-                .await
-                .expect("diagnostics task panicked"),
-        )
+        Json(doctor_report().await)
     }
 
     #[tool(
@@ -165,11 +161,7 @@ impl ComputerUseLinux {
         )
     )]
     async fn setup_accessibility(&self) -> Json<SetupReport> {
-        Json(
-            tokio::task::spawn_blocking(setup_accessibility_report)
-                .await
-                .expect("accessibility setup task panicked"),
-        )
+        Json(setup_accessibility_report().await)
     }
 
     #[tool(
@@ -306,9 +298,7 @@ impl ComputerUseLinux {
         Parameters(params): Parameters<GetAppStateParams>,
     ) -> Json<GetAppStateOutput> {
         let verbose = params.verbose.unwrap_or(false);
-        let diagnostics = tokio::task::spawn_blocking(doctor_report)
-            .await
-            .expect("diagnostics task panicked");
+        let diagnostics = doctor_report().await;
         let (window_context, window_error, window_permissions_hint) =
             self.resolve_window_context(&params).await;
         let (max_nodes, max_depth) =

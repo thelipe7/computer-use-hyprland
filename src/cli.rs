@@ -7,8 +7,11 @@ pub(crate) async fn run_from_env() -> Result<()> {
 
     match std::env::args().nth(1).as_deref() {
         Some("mcp") => server::serve_mcp().await,
-        Some("doctor") => print_json(&diagnostics::doctor_report(), "doctor report"),
-        Some("setup") => print_json(&diagnostics::setup_accessibility_report(), "setup report"),
+        Some("doctor") => print_json(&diagnostics::doctor_report().await, "doctor report"),
+        Some("setup") => print_json(
+            &diagnostics::setup_accessibility_report().await,
+            "setup report",
+        ),
         Some("apps") => print_json(
             &atspi_tree::list_accessible_apps(50).await?,
             "accessible apps",

@@ -21,8 +21,8 @@ pub(crate) mod atspi_tree {
     pub(crate) use crate::atspi_tree_impl::{
         AccessibilityAction, AccessibilityNode, AccessibleAppSummary, Bounds,
         FocusedElementSummary, ValueSetInvocation, element_states, focused_element_summary,
-        grab_focus, is_stale_object_error, list_accessible_apps, perform_action, set_element_value,
-        snapshot_limits, snapshot_tree,
+        grab_focus, is_stale_object_error, list_accessible_apps, perform_action, probe_connection,
+        set_element_value, snapshot_limits, snapshot_tree,
     };
 }
 
