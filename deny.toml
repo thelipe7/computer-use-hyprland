@@ -1,0 +1,50 @@
+# What `cargo deny check` enforces about the dependency tree, run in CI on
+# every change and again daily by `.github/workflows/security.yml`.
+#
+# Two checks read two different graphs. Measured on cargo-deny 0.20.2:
+# `[advisories]` reads the whole graph, dev-dependencies included.
+# `[licenses]` reads what ships, because `include-dev` defaults to false.
+
+[advisories]
+version = 2
+yanked = "deny"
+# A direct dependency nobody maintains is a decision to make; a transitive one
+# is usually somebody else's to make first. `workspace` flags the direct ones.
+unmaintained = "workspace"
+# Each entry would carry a reason and the condition that removes it, because
+# an ignore with neither outlives the advisory it was written for. Empty
+# today: the two that used to sit here covered quick-xml reached through
+# wayland-scanner, and no Wayland crate is in this graph any more.
+ignore = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[licenses]
+version = 2
+# Starts at what this project itself is licensed under. Adding an entry is the
+# decision to accept that license, so the list grows one deliberate line at a
+# time. Everything below arrived with a dependency, and every one of them is
+# permissive: nothing in this graph is copyleft, and a copyleft dependency
+# should fail the gate rather than be discovered at release time.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "0BSD",
+    "BSD-3-Clause",
+    # The Unicode data tables under `icu_*`, reached through `zbus`.
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Nothing is taken from git. A dependency that has to be would be a line here
+# and a decision about who is trusted to change it under us.
+allow-git = []
