@@ -1,6 +1,6 @@
 # Everything Cargo builds. Reproducible from the sources and the lockfile, so
 # none of it belongs in history.
-/target/
+target/
 
 # rustfmt leaves these behind.
 **/*.rs.bk
