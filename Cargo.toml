@@ -13,10 +13,11 @@ repository = "https://github.com/thelipe7/computer-use-hyprland"
 readme = "README.md"
 keywords = ["mcp", "hyprland", "wayland", "accessibility", "automation"]
 categories = ["os::linux-apis", "command-line-utilities", "accessibility"]
-# What a published tarball does not need: the workflows, and the contract
-# script CI runs against a build tree. Both live in the repository, which
-# `repository` above points at.
-exclude = ["/.github/", "/scripts/"]
+# What a published tarball does not need: the workflows, the contract script
+# CI runs against a build tree, and the Claude Code plugin, which is installed
+# from the repository rather than from the registry. All of them live in the
+# repository, which `repository` above points at.
+exclude = ["/.github/", "/scripts/", "/.claude-plugin/", "/skills/"]
 
 [[bin]]
 name = "computer-use-hyprland"

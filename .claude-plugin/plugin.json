@@ -1,0 +1,27 @@
+{
+  "name": "computer-use-hyprland",
+  "version": "0.1.0",
+  "description": "Drive a Hyprland desktop over MCP: the accessibility tree, window targeting, screenshots and input, plus the skill that says how to use them in the right order.",
+  "author": {
+    "name": "Felipe Machado",
+    "email": "felipemmachado266@gmail.com"
+  },
+  "homepage": "https://github.com/thelipe7/computer-use-hyprland",
+  "repository": "https://github.com/thelipe7/computer-use-hyprland",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "hyprland",
+    "wayland",
+    "accessibility",
+    "automation",
+    "desktop"
+  ],
+  "mcpServers": {
+    "computer-use-hyprland": {
+      "type": "stdio",
+      "command": "computer-use-hyprland",
+      "args": ["mcp"]
+    }
+  }
+}

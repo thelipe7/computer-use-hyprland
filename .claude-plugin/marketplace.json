@@ -1,0 +1,26 @@
+{
+  "name": "computer-use-hyprland",
+  "description": "The skill that comes with the computer-use-hyprland MCP server: how to drive a Hyprland desktop through it, and the four things that go wrong when you do not know them.",
+  "owner": {
+    "name": "Felipe Machado",
+    "email": "felipemmachado266@gmail.com",
+    "url": "https://github.com/thelipe7"
+  },
+  "plugins": [
+    {
+      "name": "computer-use-hyprland",
+      "source": "./",
+      "description": "Drive a Hyprland desktop over MCP: the accessibility tree, window targeting, screenshots and input, plus the skill that says how to use them in the right order.",
+      "version": "0.1.0",
+      "category": "development",
+      "keywords": [
+        "mcp",
+        "hyprland",
+        "wayland",
+        "accessibility",
+        "automation",
+        "desktop"
+      ]
+    }
+  ]
+}

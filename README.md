@@ -76,6 +76,19 @@ An empty `readiness.blockers` means it is ready.
 }
 ```
 
+### Or install it as a Claude Code plugin
+
+This repository is also a Claude Code marketplace carrying one plugin. It
+registers the server for you and installs a skill that says how to drive it —
+the order the tools go in, and the four failures that look like bugs.
+
+```text
+/plugin marketplace add thelipe7/computer-use-hyprland
+/plugin install computer-use-hyprland@computer-use-hyprland
+```
+
+The plugin spawns `computer-use-hyprland mcp`, so install the binary first.
+
 The other subcommands drive the same machinery by hand: `doctor`, `setup`,
 `apps`, `state [APP_NAME]`, `screenshot`, `windows`, and `abs-test X Y`, which
 clicks that desktop coordinate through the uinput pointer and prints where it
