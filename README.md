@@ -49,29 +49,31 @@ MCP tools exposed by the server:
 - `list_windows` — compositor windows with title, app id, wm_class, focus state, client type (Wayland/X11), and bounds
 - `focused_window` — the window currently holding keyboard focus
 - `get_app_state` — combined screenshot + accessibility tree for a chosen app, with element indices that the input tools accept
-- `screenshot` — capture the screen as a bounded PNG or JPEG image; can target a window, which is raised to the front and cropped to just that window
+- `wait_for` — poll (every 100 ms, default 5 s, max 60 s) until an element selector is present in the target app's tree (optionally focused), the target window's title contains a substring, and/or a window selector holds focus; returns the matching element with its index in a freshly cached tree
+- `pointer_position` — the pointer's desktop coordinates (Hyprland `hyprctl cursorpos`, X11 `xdotool getmouselocation`)
+- `screenshot` — capture the screen as a bounded PNG or JPEG image; can target a window, which is raised to the front and cropped to just that window, or captured in place with `raise_window: false` (the caption then lists `occluded_by`, the windows above it). `region` crops to a rectangle in desktop or window-relative coordinates before any resize, to zoom into small text; the caption's `crop` reports the returned rectangle
 
 Screenshot payloads are size-bounded by default before they are returned to the MCP host: max 1920 px width/height and 2 MiB image bytes, with hard caps even when callers request more. Agents that need more detail can pass `max_width`, `max_height`, `max_bytes`, `scale`, `format: "jpeg"`, or `quality`, preferably with a window target or crop. PNG remains the default; JPEG lets callers trade lossless pixels for a smaller payload before the byte cap forces further resizing. Returned screenshot metadata includes `coordinate_width`, `coordinate_height`, `scale`, `format`, and `quality` so callers can convert from a downscaled preview to desktop coordinate pixels.
 
 **Input**
 
-- `click` — by element index, semantic selector, or desktop coordinate pixels
-- `drag` — desktop coordinate drag (start / end)
-- `scroll` — page-based scroll on an element or at a pixel location
-- `press_key` — keys / chords; can focus a window or terminal first
+- `click` — by element index, `object_ref`, semantic selector, or desktop coordinate pixels; a plain left click on an element with an AT-SPI `click` action invokes the action first and falls back to the pointer; `modifiers` (ctrl/alt/shift/meta) are held around a pointer click
+- `drag` — desktop coordinate drag (start / end), with optional `modifiers`
+- `scroll` — page-based scroll on an element or at a pixel location; an element exposing an AT-SPI "scroll down"-style action gets that action before wheel events
+- `press_key` — one key or chord (`key`), or a sequence (`keys`) in one call; can focus a window or terminal first
 - `type_text` — literal text input, optionally targeted at a window or terminal
 
-Targeted `press_key`/`type_text` results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus. Click/screenshot/input results warn when the target window or coordinate is partially or fully off-screen. `get_app_state` returns a compact readiness block by default; pass `verbose: true` for the full diagnostics report.
+`click`, `drag`, `perform_action`, `press_key`, and `type_text` results append focused-element feedback from AT-SPI (role, name, editable, states) and warn when no editable element holds focus after typing; element clicks and actions also report the element's states before and after when they changed. Element operations on a tree whose app restarted or whose window closed answer `cached accessibility tree is stale (app restarted or window closed); call get_app_state again` instead of a raw DBus error. Click/screenshot/input results warn when the target window or coordinate is partially or fully off-screen. `get_app_state` returns a compact readiness block by default; pass `verbose: true` for the full diagnostics report.
 
 **Semantic actions**
 
 - `perform_action` — invoke any AT-SPI action exposed by an element (`Press`, `Activate`, `Toggle`, …); defaults to the primary action
-- `set_value` — write to a settable accessibility element (text fields, sliders, spinners)
+- `set_value` — write to a settable accessibility element (text fields, sliders, spinners); an element with neither Value nor EditableText that is focusable and editable by state gets a keyboard fallback (AT-SPI GrabFocus, Ctrl+A, type), which the result reports
 
 **Navigation**
 
 - `activate_window` — focus a window by `window_id`, `pid`, `app_id`, `wm_class`, `title`, or terminal selectors
-- `move_window` / `resize_window` — reposition or resize a window in desktop coordinates (GNOME Shell extension backend); useful to recover windows that are partially off-screen
+- `move_window` / `resize_window` — reposition or resize a window in desktop coordinates (GNOME Shell extension, Hyprland, or X11/EWMH backend); useful to recover windows that are partially off-screen. On Hyprland a tiled window is refused with the `hyprctl dispatch setfloating` hint instead of being floated behind the caller's back
 
 **Conditional host execution**
 
@@ -83,7 +85,7 @@ Targeted `press_key`/`type_text` results append focused-element feedback from AT
 
 | Class | Tools | Contract |
 | --- | --- | --- |
-| Read-only observation | `doctor`, `list_apps`, `list_windows`, `focused_window`, `get_app_state` | `readOnlyHint=true`; may reveal app, window, accessibility, and screenshot contents. `get_app_state` may trigger the desktop screenshot portal prompt. |
+| Read-only observation | `doctor`, `list_apps`, `list_windows`, `focused_window`, `get_app_state`, `wait_for`, `pointer_position` | `readOnlyHint=true`; may reveal app, window, accessibility, and screenshot contents. `get_app_state` may trigger the desktop screenshot portal prompt. |
 | Local setup mutators | `setup_accessibility`, `setup_window_targeting` | `readOnlyHint=false`, `destructiveHint=false`, `idempotentHint=true`; modifies user desktop configuration by enabling accessibility or installing/enabling the GNOME window-targeting extension. |
 | UI state mutators | `activate_window`, `move_window`, `resize_window`, `scroll`, `screenshot` | `readOnlyHint=false`, `destructiveHint=false`; changes focus, geometry, or scroll position in the live desktop, or raises a window to capture it. |
 | Desktop action mutators | `click`, `drag`, `press_key`, `type_text`, `perform_action`, `set_value` | `readOnlyHint=false`, `destructiveHint=true`, `openWorldHint=true`; can trigger arbitrary actions in whatever local application is targeted. |
@@ -115,7 +117,7 @@ Validated manually on Ubuntu 25.10 (GNOME Shell 50.1, Wayland). Other compositor
 | GNOME Wayland | GNOME Shell extension first, `org.gnome.Shell.Introspect` fallback | Full target. The extension provides exact window activation when GNOME blocks native introspection; Introspect can list windows and focus apps by `app_id` when allowed. |
 | GNOME X11 | `org.gnome.Shell.Introspect`, then generic X11/EWMH | AT-SPI works; keyboard input prefers `xdotool`/XTEST so the live XKB layout resolves keys correctly. |
 | KDE Plasma / KWin | temporary KWin DBus scripting | Lists and focuses windows through Plasma 5 or 6 `org.kde.KWin` scripting APIs when the session bus exposes them. |
-| Hyprland | `hyprctl clients -j` and `hyprctl dispatch focuswindow` | Requires `hyprctl` in the desktop session. |
+| Hyprland | `hyprctl clients -j`, `hyprctl dispatch focuswindow` / `movewindowpixel` / `resizewindowpixel`, `hyprctl cursorpos` | Requires `hyprctl` in the desktop session. Pixel moves and resizes apply to floating windows only. |
 | i3 | `i3-msg`; optional `xprop` for PID hydration | Lists and focuses i3 windows over the active i3 IPC socket. |
 | COSMIC Wayland | `computer-use-linux-cosmic` helper | Installed automatically by `./install.sh`, `cargo install`, and npm. For custom/manual layouts, put the helper next to the main binary, on `PATH`, or point `COMPUTER_USE_LINUX_COSMIC_HELPER` at it. |
 | Sway / generic wlroots | no dedicated backend yet | AT-SPI, screenshots, and global `ydotool` input can still work; exact window list/focus is currently unavailable unless another backend applies. |
@@ -365,6 +367,7 @@ Most setups need none of these — `doctor` and the installers pick sensible def
 | `COMPUTER_USE_LINUX_FORCE_XDOTOOL_KEYBOARD` | Prefer `xdotool`/XTEST keyboard input when `DISPLAY` is available. `COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD=1` takes precedence. |
 | `COMPUTER_USE_LINUX_SCREENSHOT_BACKEND` | Force a single screenshot backend, skipping the fallback chain. Accepts `gnome-shell`, `portal`, or `gnome-screenshot`. Pin `gnome-screenshot` for background/systemd contexts where the GNOME Shell and portal DBus paths are denied. |
 | `COMPUTER_USE_LINUX_ENABLE_SHELL` | Set exactly to `1` before starting the MCP server to register the destructive `run_shell` tool. Unset by default. Do not enable for untrusted or unattended MCP hosts. |
+| `COMPUTER_USE_LINUX_ALLOWED_APPS` | Comma-separated patterns matched case-insensitively as substrings of a window's `app_id`, `wm_class`, or title. When set, every input tool resolves its target window (the focused window when it targets none) and refuses with `ok: false` when no pattern matches. Unset means no restriction. |
 
 **Build-time identity overrides** (set while compiling a downstream embedded
 bundle): `CUL_GNOME_EXTENSION_UUID`, `CUL_DBUS_SERVICE`, and
@@ -402,6 +405,8 @@ Computer-use tooling is, by definition, a privilege-escalation surface. The thre
 - **AT-SPI exposes window contents to any client on your session bus.** Enabling the AT-SPI bridge (`setup_accessibility`) is a prerequisite for this binary; it's also what screen readers use, and it shares the same trust boundary.
 - **The GNOME Shell extension** is loaded only into your user's GNOME Shell, runs in the Shell's JS sandbox, and exposes a single DBus interface on the user session bus. It does not request any extra permissions.
 - **No network.** This binary opens no TCP/UDP listener, makes no outbound Internet connections, and ships no telemetry. It does use local session transports such as DBus and the per-user `ydotoold` Unix socket.
+- **One session drives the desktop at a time.** The first input action of a server process (`click`, `drag`, `scroll`, `type_text`, `press_key`, `perform_action`, `set_value`, `move_window`, `resize_window`) takes an `flock` on `$XDG_RUNTIME_DIR/computer-use-linux.lock` and holds it until the process exits. A second server process answers `Computer use is in use by another session (pid N)` with `ok: false` for every input tool. Read-only tools never take the lock.
+- **An app allowlist limits where input can go.** With `COMPUTER_USE_LINUX_ALLOWED_APPS` set (comma-separated `app_id` / `wm_class` / title-substring patterns), every input tool refuses when its target window, or the focused window for untargeted actions, matches none of the patterns. Unset, behaviour is unchanged.
 - **Mutating tools are explicit.** The MCP tool list annotates read-only versus mutating tools, and CI fails if the published tool annotations drift from the table above. Treat those annotations as hints; the host is still responsible for user approval and policy.
 
 If you're running this on a shared workstation, set `ydotoold`'s socket permissions to `0600` (the default) and audit which processes on your user can `connect()` to it.

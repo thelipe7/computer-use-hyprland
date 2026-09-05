@@ -19,6 +19,13 @@ pub struct WindowInfo {
     pub terminal: Option<TerminalWindowContext>,
 }
 
+/// A window that overlaps a screenshot target and sits above it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+pub struct WindowOcclusion {
+    pub window_id: u64,
+    pub title: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct WindowBounds {
     pub x: Option<i32>,

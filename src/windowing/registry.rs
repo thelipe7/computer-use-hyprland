@@ -1,5 +1,5 @@
 use crate::windowing::backends::{cosmic, gnome, hyprland, i3, kwin, x11};
-use crate::windowing::types::WindowInfo;
+use crate::windowing::types::{WindowInfo, WindowOcclusion};
 use anyhow::{anyhow, Result};
 
 pub use cosmic::COSMIC_WAYLAND_BACKEND;
@@ -240,9 +240,10 @@ pub async fn move_window(window: &WindowInfo, x: i32, y: i32) -> Result<String> 
         GNOME_SHELL_EXTENSION_BACKEND => {
             gnome::move_extension_window(window.window_id, x, y).await
         }
+        HYPRLAND_BACKEND => hyprland::move_window(window.window_id, x, y).await,
         X11_BACKEND => x11::move_window(window.window_id, x, y).await,
         backend => Err(anyhow!(
-            "Window backend {backend} cannot move windows; move_window needs the computer-use-linux GNOME Shell extension or a generic X11/EWMH session."
+            "Window backend {backend} cannot move windows; move_window needs the computer-use-linux GNOME Shell extension, Hyprland, or a generic X11/EWMH session."
         )),
     }
 }
@@ -252,11 +253,39 @@ pub async fn resize_window(window: &WindowInfo, width: i32, height: i32) -> Resu
         GNOME_SHELL_EXTENSION_BACKEND => {
             gnome::resize_extension_window(window.window_id, width, height).await
         }
+        HYPRLAND_BACKEND => hyprland::resize_window(window.window_id, width, height).await,
         X11_BACKEND => x11::resize_window(window.window_id, width, height).await,
         backend => Err(anyhow!(
-            "Window backend {backend} cannot resize windows; resize_window needs the computer-use-linux GNOME Shell extension or a generic X11/EWMH session."
+            "Window backend {backend} cannot resize windows; resize_window needs the computer-use-linux GNOME Shell extension, Hyprland, or a generic X11/EWMH session."
         )),
     }
+}
+
+/// Windows overlapping `window` from above, for a capture that does not
+/// raise it. Empty when the backend cannot tell.
+pub async fn occluding_windows(window: &WindowInfo) -> Vec<WindowOcclusion> {
+    match window.backend.as_str() {
+        HYPRLAND_BACKEND => hyprland::occluding_windows(window.window_id)
+            .await
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// The pointer's desktop coordinates and the backend that answered, or
+/// `None` when no registered backend can read the pointer.
+pub async fn pointer_position() -> Result<Option<((i32, i32), &'static str)>> {
+    if hyprland::is_active() {
+        return hyprland::cursor_position()
+            .await
+            .map(|point| Some((point, HYPRLAND_BACKEND)));
+    }
+    if x11::is_x11_session() {
+        return x11::pointer_position()
+            .await
+            .map(|point| Some((point, X11_BACKEND)));
+    }
+    Ok(None)
 }
 
 pub async fn focused_window_override() -> Option<WindowInfo> {

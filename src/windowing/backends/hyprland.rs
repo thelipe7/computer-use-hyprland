@@ -1,17 +1,21 @@
 use crate::command_runner;
 use crate::terminal::enrich_terminal_windows;
 use crate::windowing::registry::BackendProbe;
-use crate::windowing::types::{WindowBounds, WindowInfo};
+use crate::windowing::types::{WindowBounds, WindowInfo, WindowOcclusion};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::fs;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tokio::process::Command;
+use tokio::time::sleep;
 
 pub const HYPRLAND_BACKEND: &str = "hyprland";
+
+const GEOMETRY_VERIFY_ATTEMPTS: usize = 11;
+const GEOMETRY_VERIFY_DELAY: Duration = Duration::from_millis(50);
 
 pub fn probe() -> BackendProbe {
     match hyprctl_output(&["clients", "-j"]) {
@@ -205,6 +209,50 @@ impl HyprlandCaptureLayout {
             [(right - left) as u32, (bottom - top) as u32],
         ))
     }
+
+    /// [`Self::map_bounds`] for a single point: Hyprland's global layout
+    /// coordinates to desktop (screenshot-space) coordinates.
+    fn map_point(&self, point: [i32; 2]) -> (i32, i32) {
+        (
+            self.map_axis(point[0], self.origin_x),
+            self.map_axis(point[1], self.origin_y),
+        )
+    }
+
+    fn map_axis(&self, value: i32, origin: i32) -> i32 {
+        let scaled = ((i64::from(value) - i64::from(origin)) as f64 * self.scale).round();
+        scaled.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+    }
+
+    /// Inverse of [`Self::map_bounds`] for a point: desktop (screenshot-space)
+    /// coordinates back to Hyprland's global layout coordinates.
+    fn unmap_point(&self, point: [i32; 2]) -> [i32; 2] {
+        [
+            self.unmap_axis(point[0], self.origin_x),
+            self.unmap_axis(point[1], self.origin_y),
+        ]
+    }
+
+    /// Inverse of [`Self::map_bounds`] for a size: desktop pixels back to
+    /// Hyprland's global layout units.
+    fn unmap_size(&self, size: [i32; 2]) -> [i32; 2] {
+        [self.unmap_axis(size[0], 0), self.unmap_axis(size[1], 0)]
+    }
+
+    fn unmap_axis(&self, value: i32, origin: i32) -> i32 {
+        let unscaled = (f64::from(value) / self.scale).round();
+        let unscaled = unscaled.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
+        unscaled.saturating_add(origin)
+    }
+}
+
+async fn capture_layout() -> Option<HyprlandCaptureLayout> {
+    let output = hyprctl_output_async(&["monitors", "-j"]).await.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let monitors = serde_json::from_slice::<Vec<HyprlandMonitor>>(&output.stdout).ok()?;
+    HyprlandCaptureLayout::from_monitors(&monitors)
 }
 
 fn windows_from_hyprland_clients(clients: Vec<HyprlandClient>) -> Result<Vec<WindowInfo>> {
@@ -240,6 +288,319 @@ pub async fn activate_window(window_id: u64) -> Result<()> {
             command_detail(&legacy_output)
         );
     }
+}
+
+/// True when this process runs inside a Hyprland session it can reach.
+pub fn is_active() -> bool {
+    std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty())
+        || infer_hyprland_instance_signature().is_some()
+}
+
+/// The pointer position in desktop (screenshot-space) coordinates, from
+/// `hyprctl cursorpos`.
+pub async fn cursor_position() -> Result<(i32, i32)> {
+    let output = hyprctl_output_async(&["cursorpos"])
+        .await
+        .context("failed to run hyprctl cursorpos")?;
+    if !output.status.success() {
+        bail!("hyprctl cursorpos failed: {}", command_detail(&output));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let (x, y) = parse_cursorpos(&text)
+        .with_context(|| format!("unexpected hyprctl cursorpos output {:?}", text.trim()))?;
+    Ok(match capture_layout().await {
+        Some(layout) => layout.map_point([x, y]),
+        None => (x, y),
+    })
+}
+
+/// `hyprctl cursorpos` prints `<x>, <y>` in global layout coordinates.
+fn parse_cursorpos(text: &str) -> Option<(i32, i32)> {
+    let mut parts = text.trim().split(',').map(str::trim);
+    let x = parts.next()?.parse().ok()?;
+    let y = parts.next()?.parse().ok()?;
+    parts.next().is_none().then_some((x, y))
+}
+
+/// Windows that overlap `window_id` and sit above it.
+///
+/// `hyprctl clients -j` carries no stacking order, so `focusHistoryID` stands
+/// in for it: Hyprland raises a floating window when it is focused, so a more
+/// recently focused overlapping window on the same workspace is above the
+/// target. Tiled windows never overlap each other, so the approximation only
+/// misses a floating window raised without focus.
+pub async fn occluding_windows(window_id: u64) -> Result<Vec<WindowOcclusion>> {
+    let output = hyprctl_output_async(&["clients", "-j"])
+        .await
+        .context("failed to run hyprctl clients -j")?;
+    if !output.status.success() {
+        bail!(
+            "hyprctl clients -j failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let clients: Vec<HyprlandClient> = serde_json::from_slice(&output.stdout)
+        .context("failed to parse hyprctl clients -j output")?;
+    Ok(occluders_from_clients(&clients, window_id))
+}
+
+fn occluders_from_clients(clients: &[HyprlandClient], window_id: u64) -> Vec<WindowOcclusion> {
+    let Some(target) = clients
+        .iter()
+        .find(|client| parse_hyprland_address(&client.address).ok() == Some(window_id))
+    else {
+        return Vec::new();
+    };
+    let Some((target_at, target_size)) = target.at.zip(target.size) else {
+        return Vec::new();
+    };
+    let target_workspace = target.workspace.as_ref().and_then(|workspace| workspace.id);
+    clients
+        .iter()
+        .filter(|client| client.mapped.unwrap_or(true) && !client.hidden.unwrap_or(false))
+        .filter(|client| client.address != target.address)
+        .filter(|client| {
+            client.workspace.as_ref().and_then(|workspace| workspace.id) == target_workspace
+        })
+        .filter(
+            |client| match (client.focus_history_id, target.focus_history_id) {
+                (Some(client_focus), Some(target_focus)) => client_focus < target_focus,
+                (Some(_), None) => true,
+                (None, _) => false,
+            },
+        )
+        .filter(|client| {
+            client
+                .at
+                .zip(client.size)
+                .is_some_and(|(at, size)| rects_intersect(at, size, target_at, target_size))
+        })
+        .filter_map(|client| {
+            Some(WindowOcclusion {
+                window_id: parse_hyprland_address(&client.address).ok()?,
+                title: client.title.clone(),
+            })
+        })
+        .collect()
+}
+
+fn rects_intersect(at_a: [i32; 2], size_a: [u32; 2], at_b: [i32; 2], size_b: [u32; 2]) -> bool {
+    let right_a = i64::from(at_a[0]) + i64::from(size_a[0]);
+    let bottom_a = i64::from(at_a[1]) + i64::from(size_a[1]);
+    let right_b = i64::from(at_b[0]) + i64::from(size_b[0]);
+    let bottom_b = i64::from(at_b[1]) + i64::from(size_b[1]);
+    i64::from(at_a[0]) < right_b
+        && i64::from(at_b[0]) < right_a
+        && i64::from(at_a[1]) < bottom_b
+        && i64::from(at_b[1]) < bottom_a
+}
+
+pub async fn move_window(window_id: u64, x: i32, y: i32) -> Result<String> {
+    let target = match capture_layout().await {
+        Some(layout) => layout.unmap_point([x, y]),
+        None => [x, y],
+    };
+    let before = query_client(window_id).await?;
+    let dispatcher = run_dispatch_with_fallback(
+        &lua_move_dispatch(window_id, target),
+        &move_window_dispatch(window_id, target),
+    )
+    .await?;
+    let after = wait_for_client(window_id, |client| client.at == Some(target)).await?;
+    if after.at == Some(target) {
+        return Ok(format!("Moved window to ({x}, {y}) via {dispatcher}."));
+    }
+    if after.at == before.at {
+        refuse_if_tiled(window_id, &before, dispatcher)?;
+    }
+    Ok(format!(
+        "Requested move to ({x}, {y}) via {dispatcher}; Hyprland reported global position {}.",
+        describe_pair(after.at.map(|[x, y]| (i64::from(x), i64::from(y))))
+    ))
+}
+
+pub async fn resize_window(window_id: u64, width: i32, height: i32) -> Result<String> {
+    if width <= 0 || height <= 0 {
+        bail!("resize requires positive width and height (got {width}x{height})");
+    }
+    let target = match capture_layout().await {
+        Some(layout) => layout.unmap_size([width, height]),
+        None => [width, height],
+    };
+    let target_size = [target[0].max(1) as u32, target[1].max(1) as u32];
+    let before = query_client(window_id).await?;
+    let dispatcher = run_dispatch_with_fallback(
+        &lua_resize_dispatch(window_id, target),
+        &resize_window_dispatch(window_id, target),
+    )
+    .await?;
+    // An exact resize re-centres the window, so `at` changes too; the caller
+    // sees the fresh geometry through the re-query, and only the size decides
+    // whether the request landed.
+    let after = wait_for_client(window_id, |client| client.size == Some(target_size)).await?;
+    if after.size == Some(target_size) {
+        return Ok(format!(
+            "Resized window to {width}x{height} via {dispatcher}."
+        ));
+    }
+    if after.size == before.size {
+        refuse_if_tiled(window_id, &before, dispatcher)?;
+    }
+    Ok(format!(
+        "Requested resize to {width}x{height} via {dispatcher}; Hyprland reported global size {}.",
+        describe_pair(after.size.map(|[w, h]| (i64::from(w), i64::from(h))))
+    ))
+}
+
+fn window_address(window_id: u64) -> String {
+    format!("address:0x{window_id:x}")
+}
+
+/// Hyprland 0.55+ with a Lua config wraps every `hyprctl dispatch` argument
+/// as `return hl.dispatch(<arg>)`, so the legacy `movewindowpixel` syntax is
+/// rejected there ("')' expected near 'exact'") and the Lua table form is the
+/// one that works. Coordinates are Hyprland's global layout coordinates, the
+/// ones `hyprctl clients -j` reports in `at`.
+fn lua_move_dispatch(window_id: u64, [x, y]: [i32; 2]) -> String {
+    format!(
+        "hl.dsp.window.move({{ window = \"{}\", exact = true, x = {x}, y = {y} }})",
+        window_address(window_id)
+    )
+}
+
+/// The Lua resize form: `x`/`y` carry the width and height.
+fn lua_resize_dispatch(window_id: u64, [width, height]: [i32; 2]) -> String {
+    format!(
+        "hl.dsp.window.resize({{ window = \"{}\", exact = true, x = {width}, y = {height} }})",
+        window_address(window_id)
+    )
+}
+
+/// The Lua float form. The window is named explicitly: `hl.dsp.window.float()`
+/// without arguments toggles the focused window instead.
+fn lua_float_dispatch(window_id: u64) -> String {
+    format!(
+        "hl.dsp.window.float({{ window = \"{}\", action = \"set\" }})",
+        window_address(window_id)
+    )
+}
+
+/// `hyprctl dispatch movewindowpixel exact <x> <y>,address:0x<hex>`, the
+/// pre-0.55 form kept as the fallback.
+fn move_window_dispatch(window_id: u64, [x, y]: [i32; 2]) -> [String; 3] {
+    [
+        "dispatch".to_string(),
+        "movewindowpixel".to_string(),
+        format!("exact {x} {y},{}", window_address(window_id)),
+    ]
+}
+
+/// `hyprctl dispatch resizewindowpixel exact <w> <h>,address:0x<hex>`, the
+/// pre-0.55 form kept as the fallback; the size is in Hyprland's global
+/// layout units, the ones `size` reports.
+fn resize_window_dispatch(window_id: u64, [width, height]: [i32; 2]) -> [String; 3] {
+    [
+        "dispatch".to_string(),
+        "resizewindowpixel".to_string(),
+        format!("exact {width} {height},{}", window_address(window_id)),
+    ]
+}
+
+fn float_window_hint(window_id: u64) -> String {
+    format!(
+        "hyprctl dispatch '{}' (Hyprland 0.55+ Lua config) or hyprctl dispatch setfloating {} (legacy config)",
+        lua_float_dispatch(window_id),
+        window_address(window_id)
+    )
+}
+
+/// Hyprland ignores pixel moves and resizes on tiled windows, and the
+/// floating state is deliberately left alone here: the caller decides whether
+/// to float the window, so the refusal tells it how.
+fn refuse_if_tiled(window_id: u64, client: &HyprlandClient, dispatcher: &str) -> Result<()> {
+    if client.floating == Some(false) {
+        bail!(
+            "Window 0x{window_id:x} is tiled, so Hyprland ignored {dispatcher} and its bounds did not change. Floating state was left unchanged; float it first with {} and retry.",
+            float_window_hint(window_id)
+        );
+    }
+    Ok(())
+}
+
+fn describe_pair(pair: Option<(i64, i64)>) -> String {
+    match pair {
+        Some((a, b)) => format!("({a}, {b})"),
+        None => "unknown".to_string(),
+    }
+}
+
+/// Run the Lua dispatcher first and the legacy one when it is rejected, the
+/// way `activate_window` does; returns which one Hyprland accepted.
+async fn run_dispatch_with_fallback(
+    lua_dispatch: &str,
+    legacy: &[String; 3],
+) -> Result<&'static str> {
+    let lua_output = hyprctl_output_async(&["dispatch", lua_dispatch])
+        .await
+        .with_context(|| format!("failed to run hyprctl dispatch {lua_dispatch}"))?;
+    if dispatch_succeeded(&lua_output) {
+        return Ok("hyprctl dispatch hl.dsp.window (Lua)");
+    }
+    let legacy_args = [legacy[0].as_str(), legacy[1].as_str(), legacy[2].as_str()];
+    let legacy_output = hyprctl_output_async(&legacy_args)
+        .await
+        .with_context(|| format!("failed to run hyprctl {}", legacy_args.join(" ")))?;
+    if dispatch_succeeded(&legacy_output) {
+        return Ok("hyprctl dispatch (legacy)");
+    }
+    bail!(
+        "hyprctl dispatch failed for {}; Lua dispatcher: {}; legacy dispatcher: {}",
+        legacy_args[2],
+        command_detail(&lua_output),
+        command_detail(&legacy_output)
+    );
+}
+
+async fn query_client(window_id: u64) -> Result<HyprlandClient> {
+    let output = hyprctl_output_async(&["clients", "-j"])
+        .await
+        .context("failed to run hyprctl clients -j")?;
+    if !output.status.success() {
+        bail!(
+            "hyprctl clients -j failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let clients: Vec<HyprlandClient> = serde_json::from_slice(&output.stdout)
+        .context("failed to parse hyprctl clients -j output")?;
+    clients
+        .into_iter()
+        .find(|client| parse_hyprland_address(&client.address).ok() == Some(window_id))
+        .with_context(|| format!("Hyprland window 0x{window_id:x} is not in hyprctl clients -j"))
+}
+
+/// Poll `hyprctl clients -j` until the window satisfies `reached` or the
+/// attempts run out, returning the last client state seen.
+async fn wait_for_client(
+    window_id: u64,
+    reached: impl Fn(&HyprlandClient) -> bool,
+) -> Result<HyprlandClient> {
+    let mut last = None;
+    for attempt in 0..GEOMETRY_VERIFY_ATTEMPTS {
+        let client = query_client(window_id).await?;
+        if reached(&client) {
+            return Ok(client);
+        }
+        last = Some(client);
+        if attempt + 1 < GEOMETRY_VERIFY_ATTEMPTS {
+            sleep(GEOMETRY_VERIFY_DELAY).await;
+        }
+    }
+    last.with_context(|| {
+        format!("Hyprland window 0x{window_id:x} could not be queried after the geometry request")
+    })
 }
 
 fn dispatch_succeeded(output: &std::process::Output) -> bool {
@@ -386,6 +747,7 @@ struct HyprlandClient {
     hidden: Option<bool>,
     at: Option<[i32; 2]>,
     size: Option<[u32; 2]>,
+    floating: Option<bool>,
     monitor: Option<i32>,
     workspace: Option<HyprlandWorkspace>,
     #[serde(rename = "class")]
@@ -451,7 +813,6 @@ fn parse_hyprland_address(address: &str) -> Result<u64> {
 mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
-    use std::time::Duration;
 
     #[test]
     fn rebases_global_window_coordinates_to_screenshot_space() {
@@ -602,5 +963,152 @@ mod tests {
         let selected = select_hyprland_instance(vec![older, newer]).unwrap();
 
         assert_eq!(selected.signature, "newer");
+    }
+
+    fn client(floating: Option<bool>) -> HyprlandClient {
+        serde_json::from_value(serde_json::json!({
+            "address": "0x1234abcd",
+            "at": [965, 48],
+            "size": [900, 700],
+            "floating": floating,
+            "class": "sophia",
+            "title": "Sophia"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn formats_movewindowpixel_and_resizewindowpixel_dispatches() {
+        assert_eq!(
+            move_window_dispatch(0x1234abcd, [965, 48]),
+            [
+                "dispatch".to_string(),
+                "movewindowpixel".to_string(),
+                "exact 965 48,address:0x1234abcd".to_string(),
+            ]
+        );
+        assert_eq!(
+            move_window_dispatch(0x1234abcd, [-10, 0]),
+            [
+                "dispatch".to_string(),
+                "movewindowpixel".to_string(),
+                "exact -10 0,address:0x1234abcd".to_string(),
+            ]
+        );
+        assert_eq!(
+            resize_window_dispatch(0xff, [900, 700]),
+            [
+                "dispatch".to_string(),
+                "resizewindowpixel".to_string(),
+                "exact 900 700,address:0xff".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn formats_lua_window_dispatches() {
+        assert_eq!(
+            lua_move_dispatch(0x555c37cb3770, [1000, 100]),
+            "hl.dsp.window.move({ window = \"address:0x555c37cb3770\", exact = true, x = 1000, y = 100 })"
+        );
+        assert_eq!(
+            lua_resize_dispatch(0x555c37cb3770, [800, 600]),
+            "hl.dsp.window.resize({ window = \"address:0x555c37cb3770\", exact = true, x = 800, y = 600 })"
+        );
+        assert_eq!(
+            lua_float_dispatch(0x555c37cb3770),
+            "hl.dsp.window.float({ window = \"address:0x555c37cb3770\", action = \"set\" })"
+        );
+    }
+
+    #[test]
+    fn lua_config_rejections_of_the_legacy_syntax_are_not_successes() {
+        for stdout in [
+            "error: ')' expected near 'exact' (dispatch in lua is a shorthand for hl.dispatch(...))\n",
+            "hl.dsp.window.move: expected a table, e.g. { direction = \"left\" }\n",
+            "unrecognized arguments. Expected one of: direction, x+y(+relative), workspace, into_group, out_of_group\n",
+        ] {
+            let output = std::process::Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: Vec::new(),
+            };
+            assert!(!dispatch_succeeded(&output), "{stdout}");
+        }
+    }
+
+    #[test]
+    fn tiled_window_is_refused_with_the_float_hint() {
+        let error = refuse_if_tiled(0x1234abcd, &client(Some(false)), "movewindowpixel")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("is tiled"), "{error}");
+        assert!(error.contains("movewindowpixel"), "{error}");
+        assert!(
+            error.contains(
+                "hyprctl dispatch 'hl.dsp.window.float({ window = \"address:0x1234abcd\", action = \"set\" })'"
+            ),
+            "{error}"
+        );
+        assert!(
+            error.contains("hyprctl dispatch setfloating address:0x1234abcd"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn floating_or_unknown_windows_are_not_refused() {
+        assert!(refuse_if_tiled(0x1234abcd, &client(Some(true)), "movewindowpixel").is_ok());
+        assert!(refuse_if_tiled(0x1234abcd, &client(None), "resizewindowpixel").is_ok());
+    }
+
+    #[test]
+    fn unmap_inverts_the_screenshot_space_mapping() {
+        let monitors: Vec<HyprlandMonitor> = serde_json::from_str(
+            r#"[{"id":0,"x":3747,"y":1440,"scale":1.8},{"id":1,"x":5667,"y":0,"scale":2.0}]"#,
+        )
+        .unwrap();
+        let layout = HyprlandCaptureLayout::from_monitors(&monitors).unwrap();
+
+        assert_eq!(layout.unmap_point([1934, 2988]), [4714, 1494]);
+        assert_eq!(layout.unmap_size([1862, 2248]), [931, 1124]);
+    }
+
+    #[test]
+    fn parses_hyprctl_cursorpos_and_maps_it_to_screenshot_space() {
+        assert_eq!(parse_cursorpos("1234, 567\n"), Some((1234, 567)));
+        assert_eq!(parse_cursorpos("-10,0"), Some((-10, 0)));
+        assert_eq!(parse_cursorpos("1234"), None);
+        assert_eq!(parse_cursorpos("a, b"), None);
+
+        let monitors: Vec<HyprlandMonitor> =
+            serde_json::from_str(r#"[{"id":0,"x":3747,"y":1440,"scale":2.0}]"#).unwrap();
+        let layout = HyprlandCaptureLayout::from_monitors(&monitors).unwrap();
+        assert_eq!(layout.map_point([4714, 1494]), (1934, 108));
+    }
+
+    #[test]
+    fn occluders_are_overlapping_more_recently_focused_windows_on_the_workspace() {
+        let clients: Vec<HyprlandClient> = serde_json::from_str(
+            r#"[
+                {"address":"0x1","at":[100,100],"size":[500,400],"workspace":{"id":1},"title":"Target","focusHistoryID":2},
+                {"address":"0x2","at":[300,300],"size":[400,400],"workspace":{"id":1},"title":"Above","focusHistoryID":0},
+                {"address":"0x3","at":[300,300],"size":[400,400],"workspace":{"id":1},"title":"Below","focusHistoryID":3},
+                {"address":"0x4","at":[300,300],"size":[400,400],"workspace":{"id":2},"title":"Elsewhere","focusHistoryID":1},
+                {"address":"0x5","at":[700,700],"size":[100,100],"workspace":{"id":1},"title":"Apart","focusHistoryID":1},
+                {"address":"0x6","at":[100,100],"size":[50,50],"workspace":{"id":1},"title":"Hidden","hidden":true,"focusHistoryID":1}
+            ]"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            occluders_from_clients(&clients, 0x1),
+            vec![WindowOcclusion {
+                window_id: 0x2,
+                title: Some("Above".to_string()),
+            }]
+        );
+        assert!(occluders_from_clients(&clients, 0x99).is_empty());
     }
 }

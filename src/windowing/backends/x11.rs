@@ -31,7 +31,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Requires an X `DISPLAY` and either an explicit `x11` session type or the
 /// absence of a Wayland display, so we never hijack XWayland under a Wayland
 /// compositor (where a native backend should answer instead).
-fn is_x11_session() -> bool {
+pub(crate) fn is_x11_session() -> bool {
     if env_nonempty("DISPLAY").is_none() {
         return false;
     }
@@ -290,6 +290,42 @@ fn window_id_arg(window_id: u64) -> String {
 
 fn wmctrl() -> Command {
     Command::new("wmctrl")
+}
+
+/// The pointer position in desktop coordinates, from
+/// `xdotool getmouselocation --shell`.
+pub async fn pointer_position() -> Result<(i32, i32)> {
+    let mut command = TokioCommand::new("xdotool");
+    command.args(["getmouselocation", "--shell"]);
+    let output = command_runner::output(command, "query X11 pointer position").await?;
+    if !output.status.success() {
+        bail!(
+            "xdotool getmouselocation failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    parse_mouselocation(&text).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unexpected xdotool getmouselocation output {:?}",
+            text.trim()
+        )
+    })
+}
+
+/// `xdotool getmouselocation --shell` prints `X=<x>`, `Y=<y>`, `SCREEN=` and
+/// `WINDOW=` lines.
+fn parse_mouselocation(text: &str) -> Option<(i32, i32)> {
+    let mut x = None;
+    let mut y = None;
+    for line in text.lines() {
+        if let Some(value) = line.trim().strip_prefix("X=") {
+            x = value.trim().parse().ok();
+        } else if let Some(value) = line.trim().strip_prefix("Y=") {
+            y = value.trim().parse().ok();
+        }
+    }
+    x.zip(y)
 }
 
 fn wmctrl_async() -> TokioCommand {
@@ -562,5 +598,14 @@ mod tests {
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].title, None);
         assert_eq!(windows[0].wm_class.as_deref(), Some("Term"));
+    }
+
+    #[test]
+    fn parses_xdotool_mouselocation_shell_output() {
+        assert_eq!(
+            parse_mouselocation("X=640\nY=480\nSCREEN=0\nWINDOW=1234\n"),
+            Some((640, 480))
+        );
+        assert_eq!(parse_mouselocation("SCREEN=0\n"), None);
     }
 }

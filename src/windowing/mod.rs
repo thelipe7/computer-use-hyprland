@@ -14,7 +14,7 @@ pub use target::{
     window_permission_hint,
 };
 #[allow(unused_imports)]
-pub use types::{WindowBounds, WindowFocusResult, WindowInfo, WindowTarget};
+pub use types::{WindowBounds, WindowFocusResult, WindowInfo, WindowOcclusion, WindowTarget};
 
 #[cfg(test)]
 mod tests {

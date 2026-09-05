@@ -1,6 +1,7 @@
 use crate::atspi_tree::{
-    focused_element_summary, list_accessible_apps, perform_action as invoke_accessibility_action,
-    set_element_value, snapshot_tree, AccessibilityAction, AccessibilityNode, AccessibleAppSummary,
+    element_states, focused_element_summary, grab_focus, is_stale_object_error,
+    list_accessible_apps, perform_action as invoke_accessibility_action, set_element_value,
+    snapshot_limits, snapshot_tree, AccessibilityAction, AccessibilityNode, AccessibleAppSummary,
     Bounds, FocusedElementSummary, ValueSetInvocation,
 };
 use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
@@ -18,7 +19,7 @@ use crate::screenshot::{
 use crate::windowing::registry;
 use crate::windows::{
     focus_window_target, focused_window, list_windows, resolve_window_target,
-    window_permission_hint, WindowFocusResult, WindowInfo, WindowTarget,
+    window_permission_hint, WindowFocusResult, WindowInfo, WindowOcclusion, WindowTarget,
     GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND, KWIN_BACKEND,
 };
 use crate::ydotool;
@@ -49,6 +50,15 @@ use tokio::{
 use zbus::{Connection as ZbusConnection, Proxy as ZbusProxy};
 
 const INPUT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const WAIT_FOR_DEFAULT_TIMEOUT_MS: u64 = 5_000;
+const STALE_TREE_MESSAGE: &str =
+    "cached accessibility tree is stale (app restarted or window closed); call get_app_state again";
+const WAIT_FOR_MAX_TIMEOUT_MS: u64 = 60_000;
+const WAIT_FOR_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const KEY_SEQUENCE_DELAY: Duration = Duration::from_millis(60);
+/// How long an app gets to react before post-action feedback is read.
+const POST_ACTION_SETTLE: Duration = Duration::from_millis(120);
+const ALLOWED_APPS_ENV: &str = "COMPUTER_USE_LINUX_ALLOWED_APPS";
 const YDOTOOL_TYPE_CHARS_PER_SECOND: u64 = 20;
 const KDE_CLIPBOARD_DBUS_TIMEOUT: Duration = Duration::from_secs(3);
 const KDE_KLIPPER_SERVICE: &str = "org.kde.klipper";
@@ -66,6 +76,10 @@ const SHELL_RESPONSE_STREAM_BYTES: usize = 512 * 1024;
 #[derive(Clone, Default)]
 pub struct ComputerUseLinux {
     last_nodes: Arc<Mutex<Vec<AccessibilityNode>>>,
+    /// Offset that turns the cached nodes' bounds into desktop coordinates
+    /// when the tree reported them relative to its window. See
+    /// [`window_relative_bounds_offset`].
+    node_bounds_offset: Arc<Mutex<Option<BoundsOffset>>>,
     portal_pointer_session: Arc<Mutex<Option<PortalPointerSession>>>,
     portal_keyboard_session: Arc<Mutex<Option<PortalKeyboardSession>>>,
     /// Lazily-created uinput absolute pointer (preferred coordinate backend).
@@ -375,7 +389,7 @@ impl ComputerUseLinux {
                 )
             };
         if accessibility_error.is_none() {
-            self.cache_nodes(&accessibility_tree);
+            self.cache_tree(&accessibility_tree, window_context.as_ref());
         } else {
             self.clear_cached_nodes();
         }
@@ -440,8 +454,147 @@ impl ComputerUseLinux {
     }
 
     #[tool(
+        name = "pointer_position",
+        description = "Report the current pointer position in desktop coordinates (the click/scroll/drag coordinate space). Supported on Hyprland (hyprctl cursorpos) and X11 (xdotool getmouselocation); other sessions answer ok=false.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn pointer_position(&self) -> Json<PointerPositionOutput> {
+        Json(match registry::pointer_position().await {
+            Ok(Some(((x, y), backend))) => PointerPositionOutput {
+                ok: true,
+                implemented: true,
+                backend: Some(backend.to_string()),
+                x: Some(x),
+                y: Some(y),
+                message: format!("Pointer at ({x}, {y}) via {backend}."),
+            },
+            Ok(None) => PointerPositionOutput {
+                ok: false,
+                implemented: true,
+                backend: None,
+                x: None,
+                y: None,
+                message: "unsupported backend: pointer_position needs a Hyprland or X11 session."
+                    .to_string(),
+            },
+            Err(error) => PointerPositionOutput {
+                ok: false,
+                implemented: true,
+                backend: None,
+                x: None,
+                y: None,
+                message: format!("{error:#}"),
+            },
+        })
+    }
+
+    #[tool(
+        name = "wait_for",
+        description = "Poll until every given predicate holds or a timeout elapses (timeout_ms default 5000, max 60000; polls every 100 ms). Predicates, all of which must hold: an element selector (role/name/text/states, the same matcher click and perform_action use) present in the target app's AT-SPI tree, optionally with focused=true; window_title, a substring of the target window's title (or of the focused window's title without a target); focused_window, a window selector that must hold focus. Target the app with the same selectors as get_app_state (pid/window_id/app_id/wm_class/title). On success the matching element is returned with its index in a freshly cached tree, so a following click/perform_action/set_value can pass element_index. On timeout ok=false with the last tree summary.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn wait_for(&self, Parameters(params): Parameters<WaitForParams>) -> Json<WaitForOutput> {
+        let received = Some(serde_json::json!(params.clone()));
+        let started = std::time::Instant::now();
+        let timeout = wait_for_timeout(params.timeout_ms);
+        let deadline = started + timeout;
+        if !wait_for_has_predicate(&params) {
+            return Json(WaitForOutput {
+                ok: false,
+                implemented: true,
+                satisfied: false,
+                elapsed_ms: 0,
+                element: None,
+                window_context: None,
+                focused_window: None,
+                last_tree_summary: None,
+                message: "wait_for needs at least one predicate: an element selector (role/name/text/states), window_title, or focused_window.".to_string(),
+                received,
+            });
+        }
+        let app_state_params = params.app_state_params();
+        let selector = params.selector();
+        let mut last = loop {
+            let probe = self
+                .probe_wait_predicates(&params, &app_state_params, &selector)
+                .await;
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            if probe.satisfied {
+                let element_note = probe
+                    .element
+                    .as_ref()
+                    .map(|element| {
+                        format!(
+                            " Matched element_index {} ({}{}) in a freshly cached tree.",
+                            element.index,
+                            element.role,
+                            element
+                                .name
+                                .as_deref()
+                                .map(|name| format!(" \"{name}\""))
+                                .unwrap_or_default()
+                        )
+                    })
+                    .unwrap_or_default();
+                return Json(WaitForOutput {
+                    ok: true,
+                    implemented: true,
+                    satisfied: true,
+                    elapsed_ms,
+                    element: probe.element,
+                    window_context: probe.window_context,
+                    focused_window: probe.focused_window,
+                    last_tree_summary: probe.summary,
+                    message: format!("Predicates satisfied after {elapsed_ms} ms.{element_note}"),
+                    received,
+                });
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                break probe;
+            }
+            sleep(WAIT_FOR_POLL_INTERVAL.min(deadline - now)).await;
+        };
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let reason = last
+            .error
+            .take()
+            .unwrap_or_else(|| "predicates never held".to_string());
+        let summary = last
+            .summary
+            .as_deref()
+            .map(|summary| format!(" {summary}."))
+            .unwrap_or_default();
+        Json(WaitForOutput {
+            ok: false,
+            implemented: true,
+            satisfied: false,
+            elapsed_ms,
+            element: None,
+            window_context: last.window_context,
+            focused_window: last.focused_window,
+            last_tree_summary: last.summary,
+            message: format!(
+                "Timed out after {} ms: {reason}.{summary}",
+                timeout.as_millis()
+            ),
+            received,
+        })
+    }
+
+    #[tool(
         name = "screenshot",
-        description = "Capture the screen and return it as a viewable, size-bounded image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize. Returns the image plus a short caption with returned dimensions, coordinate dimensions, scale, format, quality, source, and crop bounds; callers can request jpeg/quality for compression before resizing.",
+        description = "Capture the screen and return it as a viewable, size-bounded image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize. With raise_window=false the window is captured where it is and the caption lists `occluded_by` (windows above it on the same workspace, when the backend can tell) with a warning. `region` ({x, y, width, height} in desktop coordinates, or window-relative with a window target and relative=true) crops further before any resize, to zoom into small text; the caption's `crop` reports the desktop rectangle returned. Returns the image plus a short caption with returned dimensions, coordinate dimensions, scale, format, quality, source, and crop bounds; callers can request jpeg/quality for compression before resizing.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -470,6 +623,12 @@ impl ComputerUseLinux {
         let crop_window = (!params.full_screen.unwrap_or(false))
             .then_some(target_window.as_ref())
             .flatten();
+        let occluded_by = match target_window.as_ref() {
+            Some(window) if !params.raise_window.unwrap_or(true) => {
+                registry::occluding_windows(window).await
+            }
+            _ => Vec::new(),
+        };
         let window_label = target_window
             .as_ref()
             .and_then(|window| window.title.clone());
@@ -487,7 +646,7 @@ impl ComputerUseLinux {
             None => None,
         };
 
-        let (capture, cropped) = match crop_window {
+        let (capture, window_crop) = match crop_window {
             Some(window) => {
                 let (x, y, width, height) = self
                     .window_crop_rect_for_capture(window, &raw_capture)
@@ -513,10 +672,45 @@ impl ComputerUseLinux {
                         width,
                         height,
                     },
-                    true,
+                    Some((x, y, width, height)),
                 )
             }
-            None => (raw_capture, false),
+            None => (raw_capture, None),
+        };
+        let cropped = window_crop.is_some();
+        let mut crop_bounds = window_crop;
+        let capture = match params.region.as_ref() {
+            Some(region) => {
+                let ((x, y, width, height), desktop_rect) = region_crop_rect(
+                    region,
+                    params.relative.unwrap_or(false),
+                    window_crop,
+                    capture.width,
+                    capture.height,
+                )
+                .map_err(|message| {
+                    ErrorData::invalid_params(
+                        format!("screenshot region rejected: {message}"),
+                        None,
+                    )
+                })?;
+                let (bytes, width, height) = crop_png(&capture.bytes, x, y, width, height)
+                    .map_err(|error| {
+                        ErrorData::internal_error(
+                            format!("screenshot region crop failed: {error}"),
+                            None,
+                        )
+                    })?;
+                crop_bounds = Some(desktop_rect);
+                RawScreenshotCapture {
+                    mime_type: capture.mime_type,
+                    bytes,
+                    source: capture.source,
+                    width,
+                    height,
+                }
+            }
+            None => capture,
         };
         let capture =
             prepare_screenshot_payload(capture, params.screenshot_options()).map_err(|e| {
@@ -537,11 +731,21 @@ impl ComputerUseLinux {
             "quality": capture.quality,
             "source": capture.source,
             "cropped_to_window": cropped,
+            "cropped_to_region": params.region.is_some(),
+            "crop": crop_bounds.map(|(x, y, width, height)| {
+                serde_json::json!({ "x": x, "y": y, "width": width, "height": height })
+            }),
             "window_title": window_label,
         });
         if let Some(note) = off_screen_note {
             caption["window_off_screen"] = serde_json::json!(true);
             caption["off_screen_note"] = serde_json::json!(note);
+        }
+        if target_window.is_some() {
+            caption["occluded_by"] = serde_json::json!(occluded_by);
+            if let Some(note) = occlusion_note(&occluded_by) {
+                caption["occlusion_note"] = serde_json::json!(note);
+            }
         }
         Ok(CallToolResult::success(vec![
             Content::image(data_url_payload(&capture.data_url), capture.mime_type),
@@ -609,9 +813,26 @@ impl ComputerUseLinux {
         .flatten()
     }
 
+    /// Move the pointer through the absolute uinput device, or `None` to fall
+    /// through to ydotool.
+    async fn try_abs_move(&self, x: i32, y: i32) -> Option<crate::abs_pointer::PointerLanding> {
+        if !self.ensure_abs_pointer().await {
+            return None;
+        }
+        let abs_pointer = Arc::clone(&self.abs_pointer);
+        tokio::task::spawn_blocking(move || {
+            let mut guard = abs_pointer.lock().ok()?;
+            let pointer = guard.as_mut()?;
+            pointer.move_to(x, y).ok()
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
     #[tool(
         name = "click",
-        description = "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata.",
+        description = "Click an element by index, object_ref, semantic selector, or desktop coordinate pixels from screenshot metadata. A plain left click on an element that exposes an AT-SPI click action invokes that action first and only falls back to the pointer; the message says which path was used. `modifiers` (ctrl/alt/shift/meta) are held around a pointer click.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -621,6 +842,18 @@ impl ComputerUseLinux {
     )]
     async fn click(&self, Parameters(mut params): Parameters<ClickParams>) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params.clone()));
+        if let Err(message) = self
+            .input_gate("click", params.window_target().as_ref())
+            .await
+        {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "click".to_string(),
+                message,
+                received,
+            });
+        }
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let mut portal_target_point = None;
         // Raise the target window first (if specified) so the click lands on the
@@ -635,8 +868,9 @@ impl ComputerUseLinux {
                 received,
             });
         }
+        let mut focus = None;
         if let Some(target) = window_target {
-            let focus = match self.focus_target_for_input(&target).await {
+            focus = match self.focus_target_for_input(&target).await {
                 Ok(focus) => focus,
                 Err(message) => {
                     return Json(ActionOutput {
@@ -692,7 +926,8 @@ impl ComputerUseLinux {
                     .and_then(|(x, y)| coordinate_map.portal_point(x, y));
             }
         }
-        let target = match self.resolve_click_target(&params) {
+        let bounds_offset = self.current_bounds_offset().await;
+        let target = match self.resolve_click_target(&params, bounds_offset) {
             Ok(target) => target,
             Err(message) => {
                 return Json(ActionOutput {
@@ -704,51 +939,205 @@ impl ComputerUseLinux {
                 });
             }
         };
-        if let ClickTarget::PrimaryAction {
-            object_ref,
-            action_name,
-            action_index,
-        } = target
-        {
-            let action_index = action_index.to_string();
-            return match invoke_accessibility_action(&object_ref, Some(&action_index)).await {
-                Ok(invocation) => Json(ActionOutput {
-                    ok: invocation.ok,
-                    implemented: true,
-                    action: "click".to_string(),
-                    message: if invocation.ok {
-                        format!(
-                            "No clickable bounds were cached, so I invoked the primary AT-SPI action{}.",
-                            action_name
-                                .as_deref()
-                                .filter(|name| !name.is_empty())
-                                .map(|name| format!(" ({name})"))
-                                .unwrap_or_default()
-                        )
-                    } else {
-                        format!(
-                            "The primary AT-SPI action{} returned false.",
-                            action_name
-                                .as_deref()
-                                .filter(|name| !name.is_empty())
-                                .map(|name| format!(" ({name})"))
-                                .unwrap_or_default()
-                        )
-                    },
-                    received,
-                }),
-                Err(error) => Json(ActionOutput {
+        let held_modifiers = match modifier_keycodes(&params.modifiers) {
+            Ok(codes) => codes,
+            Err(message) => {
+                return Json(ActionOutput {
                     ok: false,
                     implemented: true,
                     action: "click".to_string(),
-                    message: error.to_string(),
+                    message,
                     received,
-                }),
-            };
-        }
-        let ClickTarget::Coordinates(x, y) = target else {
-            unreachable!("click target must resolve to coordinates or an AT-SPI action");
+                });
+            }
         };
+        let (element_index, object_ref, action, point, bounds_offset, states) = match target {
+            ClickTarget::Coordinates(x, y) => {
+                let output = self
+                    .click_at_point_with_modifiers(
+                        x,
+                        y,
+                        &params,
+                        received,
+                        input_guard,
+                        portal_target_point,
+                        &held_modifiers,
+                    )
+                    .await;
+                if !output.0.ok {
+                    return output;
+                }
+                let notes = self.post_action_notes(focus.as_ref(), None).await;
+                return Json(with_notes(output.0, notes));
+            }
+            ClickTarget::Element {
+                element_index,
+                object_ref,
+                action,
+                point,
+                bounds_offset,
+                states,
+            } => (
+                element_index,
+                object_ref,
+                action,
+                point,
+                bounds_offset,
+                states,
+            ),
+        };
+        let mut notes = Vec::new();
+        let action = if held_modifiers.is_empty() {
+            action
+        } else {
+            if action.is_some() {
+                notes.push(
+                    "Modifiers only apply to the pointer, so the AT-SPI click action was skipped."
+                        .to_string(),
+                );
+            }
+            None
+        };
+        if let Some(action) = action {
+            let action_label = format!(
+                "AT-SPI action {} ({})",
+                action.index,
+                if action.name.is_empty() {
+                    "unnamed"
+                } else {
+                    action.name.as_str()
+                }
+            );
+            let action_index = action.index.to_string();
+            let failure = match invoke_accessibility_action(&object_ref, Some(&action_index)).await
+            {
+                Ok(invocation) if invocation.ok => {
+                    let notes = self
+                        .post_action_notes(focus.as_ref(), Some((&object_ref, &states)))
+                        .await;
+                    return Json(with_notes(
+                        ActionOutput {
+                            ok: true,
+                            implemented: true,
+                            action: "click".to_string(),
+                            message: format!(
+                                "Invoked {action_label} on element_index {element_index}; the pointer was not used."
+                            ),
+                            received,
+                        },
+                        notes,
+                    ));
+                }
+                Ok(_) => format!("{action_label} on element_index {element_index} returned false"),
+                Err(error) if is_stale_object_error(&error) => {
+                    return Json(ActionOutput {
+                        ok: false,
+                        implemented: true,
+                        action: "click".to_string(),
+                        message: STALE_TREE_MESSAGE.to_string(),
+                        received,
+                    });
+                }
+                Err(error) => format!(
+                    "{action_label} on element_index {element_index} failed: {}",
+                    first_line(&format!("{error:#}"))
+                ),
+            };
+            if point.is_none() {
+                return Json(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "click".to_string(),
+                    message: format!("{failure}, and no clickable bounds were cached."),
+                    received,
+                });
+            }
+            notes.push(format!("{failure}; fell back to the pointer."));
+        }
+        let Some((x, y)) = point else {
+            unreachable!("an element click target carries an action or a point");
+        };
+        notes.push(match bounds_offset {
+            Some((dx, dy)) => format!(
+                "element_index {element_index} resolved to desktop point ({x}, {y}): the tree's window-relative bounds were offset by the window origin ({dx}, {dy})."
+            ),
+            None => format!("element_index {element_index} resolved to desktop point ({x}, {y})."),
+        });
+        let output = self
+            .click_at_point_with_modifiers(
+                x,
+                y,
+                &params,
+                received,
+                input_guard,
+                portal_target_point,
+                &held_modifiers,
+            )
+            .await;
+        if output.0.ok {
+            notes.extend(
+                self.post_action_notes(focus.as_ref(), Some((&object_ref, &states)))
+                    .await,
+            );
+        }
+        Json(with_notes(output.0, notes))
+    }
+
+    /// `click_at_point` with modifier keys held through ydotool around it.
+    #[allow(clippy::too_many_arguments)]
+    async fn click_at_point_with_modifiers(
+        &self,
+        x: i32,
+        y: i32,
+        params: &ClickParams,
+        received: Option<serde_json::Value>,
+        input_guard: tokio::sync::OwnedMutexGuard<()>,
+        portal_target_point: Option<(i32, i32)>,
+        held_modifiers: &[u16],
+    ) -> Json<ActionOutput> {
+        if held_modifiers.is_empty() {
+            return self
+                .click_at_point(x, y, params, received, input_guard, portal_target_point)
+                .await;
+        }
+        if let Err(message) = run_ydotool(&modifier_hold_args(held_modifiers, true)).await {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "click".to_string(),
+                message: format!("Could not hold the modifiers through ydotool: {message}"),
+                received,
+            });
+        }
+        let output = self
+            .click_at_point(x, y, params, received, input_guard, portal_target_point)
+            .await;
+        let release = run_ydotool(&modifier_hold_args(held_modifiers, false)).await;
+        let note = match release {
+            Ok(_) => format!(
+                "Held modifiers {} around the click.",
+                params.modifiers.join("+")
+            ),
+            Err(message) => format!(
+                "WARNING: modifiers {} may still be held; releasing them failed: {message}",
+                params.modifiers.join("+")
+            ),
+        };
+        Json(with_notes(output.0, [note]))
+    }
+
+    /// Click a desktop coordinate through the best pointer backend available:
+    /// the uinput absolute pointer, then the remote desktop portal, then
+    /// xdotool on X11, then ydotool.
+    async fn click_at_point(
+        &self,
+        x: i32,
+        y: i32,
+        params: &ClickParams,
+        received: Option<serde_json::Value>,
+        input_guard: tokio::sync::OwnedMutexGuard<()>,
+        portal_target_point: Option<(i32, i32)>,
+    ) -> Json<ActionOutput> {
         let button = mouse_button_code(params.button.as_deref());
         let click_count = params.click_count.unwrap_or(1).clamp(1, 10).to_string();
         // Preferred backend: the uinput absolute pointer. Unlike ydotool's
@@ -933,6 +1322,15 @@ impl ComputerUseLinux {
         &self,
         Parameters(params): Parameters<ActionParams>,
     ) -> Json<ActionOutput> {
+        if let Err(message) = self.input_gate("perform_action", None).await {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "perform_action".to_string(),
+                message,
+                received: Some(serde_json::json!(params.clone())),
+            });
+        }
         let requested_action = requested_or_primary_action(params.action.as_deref());
         self.perform_element_action(&params, Some(requested_action))
             .await
@@ -940,7 +1338,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "set_value",
-        description = "Set the value of a settable accessibility element selected by index, identifier, or semantic selector.",
+        description = "Set the value of a settable accessibility element selected by index, object_ref, identifier, or semantic selector. Uses the AT-SPI Value or EditableText interface; an element with neither that is focusable and editable by state gets a keyboard fallback (GrabFocus, Ctrl+A, type the value), which the message reports.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -953,9 +1351,21 @@ impl ComputerUseLinux {
         Parameters(params): Parameters<SetValueParams>,
     ) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params.clone()));
+        if let Err(message) = self.input_gate("set_value", None).await {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "set_value".to_string(),
+                message,
+                received,
+            });
+        }
         let object_ref = match self.resolve_object_ref(
             params.element_index,
-            params.element_identifier.as_deref(),
+            params
+                .element_identifier
+                .as_deref()
+                .or(params.object_ref.as_deref()),
             &params.selector(),
             ElementResolvePurpose::SetValue,
         ) {
@@ -986,11 +1396,19 @@ impl ComputerUseLinux {
                 message: "AT-SPI editable text contents set.".to_string(),
                 received,
             }),
+            Err(error)
+                if !is_stale_object_error(&error)
+                    && error.to_string().contains("does not expose AT-SPI Value")
+                    && self.cached_node_is_keyboard_editable(&object_ref) =>
+            {
+                self.keyboard_set_value(&object_ref, &params.value, received)
+                    .await
+            }
             Err(error) => Json(ActionOutput {
                 ok: false,
                 implemented: true,
                 action: "set_value".to_string(),
-                message: error.to_string(),
+                message: element_error_message(&error),
                 received,
             }),
         }
@@ -998,7 +1416,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "scroll",
-        description = "Scroll an element in a direction by a number of pages. With a window target and no x/y/element_index, scrolls at the centre of the targeted window.",
+        description = "Scroll an element in a direction by a number of pages. With element_index, an AT-SPI action named like \"scroll down\" for that direction is invoked first when the element exposes one; otherwise wheel events go to the element's centre. With a window target and no x/y/element_index, scrolls at the centre of the targeted window.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1008,6 +1426,18 @@ impl ComputerUseLinux {
     )]
     async fn scroll(&self, Parameters(mut params): Parameters<ScrollParams>) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params.clone()));
+        if let Err(message) = self
+            .input_gate("scroll", params.window_target().as_ref())
+            .await
+        {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "scroll".to_string(),
+                message,
+                received,
+            });
+        }
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let mut portal_target_point = None;
         let units = ((params.pages.unwrap_or(1.0).abs().max(0.1) * 5.0).round() as i32).max(1);
@@ -1121,19 +1551,64 @@ impl ComputerUseLinux {
                     .and_then(|(x, y)| coordinate_map.portal_point(x, y));
             }
         }
-        let target_point =
-            match self.resolve_optional_target_point(params.x, params.y, params.element_index) {
-                Ok(point) => point,
-                Err(message) => {
+        let mut notes = Vec::new();
+        if let Some((object_ref, action)) = params
+            .element_index
+            .zip(parse_scroll_direction(&params.direction))
+            .and_then(|(element_index, direction)| {
+                self.cached_scroll_action(element_index, direction)
+            })
+        {
+            let action_label = format!("AT-SPI action {} ({})", action.index, action.name);
+            match invoke_accessibility_action(&object_ref, Some(&action.index.to_string())).await {
+                Ok(invocation) if invocation.ok => {
+                    return Json(ActionOutput {
+                        ok: true,
+                        implemented: true,
+                        action: "scroll".to_string(),
+                        message: format!(
+                            "Invoked {action_label} on element_index {}; the wheel was not used.",
+                            params.element_index.unwrap_or_default()
+                        ),
+                        received,
+                    });
+                }
+                Ok(_) => notes.push(format!(
+                    "{action_label} returned false; fell back to the wheel."
+                )),
+                Err(error) if is_stale_object_error(&error) => {
                     return Json(ActionOutput {
                         ok: false,
                         implemented: true,
                         action: "scroll".to_string(),
-                        message,
+                        message: STALE_TREE_MESSAGE.to_string(),
                         received,
                     });
                 }
-            };
+                Err(error) => notes.push(format!(
+                    "{action_label} failed ({}); fell back to the wheel.",
+                    first_line(&format!("{error:#}"))
+                )),
+            }
+        }
+        let bounds_offset = self.current_bounds_offset().await;
+        let target_point = match self.resolve_optional_target_point(
+            params.x,
+            params.y,
+            params.element_index,
+            bounds_offset,
+        ) {
+            Ok(point) => point,
+            Err(message) => {
+                return Json(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "scroll".to_string(),
+                    message,
+                    received,
+                });
+            }
+        };
         let direction = match params.direction.to_ascii_lowercase().as_str() {
             "up" => ScrollDirection::Up,
             "down" => ScrollDirection::Down,
@@ -1230,25 +1705,15 @@ impl ComputerUseLinux {
                 Err(_) => {}
             }
         }
-        let (dx, dy) = match params.direction.to_ascii_lowercase().as_str() {
-            "up" => (0, units),
-            "down" => (0, -units),
-            "left" => (units, 0),
-            "right" => (-units, 0),
-            _ => {
-                return Json(ActionOutput {
-                    ok: false,
-                    implemented: true,
-                    action: "scroll".to_string(),
-                    message: "Unsupported scroll direction; expected up, down, left, or right."
-                        .to_string(),
-                    received,
-                });
-            }
-        };
+        let (dx, dy) = ydotool_wheel_delta(direction, units);
         let mut sequence = Vec::new();
         if let Some((x, y)) = target_point {
-            sequence.push(absolute_mousemove_args(x, y));
+            // The absolute pointer lands exactly where the click path does;
+            // ydotool's faked absolute move drifts under acceleration and
+            // scaling, so it is only the fallback for positioning the wheel.
+            if self.try_abs_move(x, y).await.is_none() {
+                sequence.push(absolute_mousemove_args(x, y));
+            }
         }
         sequence.push(wheel_mousemove_args(dx, dy));
         let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
@@ -1256,10 +1721,8 @@ impl ComputerUseLinux {
         })
         .await;
         let _input_guard = input_guard;
-        Json(with_notes(
-            action_result("scroll", result, received),
-            off_screen_note,
-        ))
+        notes.extend(off_screen_note);
+        Json(with_notes(action_result("scroll", result, received), notes))
     }
 
     #[tool(
@@ -1273,6 +1736,59 @@ impl ComputerUseLinux {
         )
     )]
     async fn drag(&self, Parameters(params): Parameters<DragParams>) -> Json<ActionOutput> {
+        if let Err(message) = self.input_gate("drag", None).await {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "drag".to_string(),
+                message,
+                received: Some(serde_json::json!(params)),
+            });
+        }
+        let held_modifiers = match modifier_keycodes(&params.modifiers) {
+            Ok(codes) => codes,
+            Err(message) => {
+                return Json(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "drag".to_string(),
+                    message,
+                    received: Some(serde_json::json!(params)),
+                });
+            }
+        };
+        let mut notes = Vec::new();
+        if !held_modifiers.is_empty() {
+            if let Err(message) = run_ydotool(&modifier_hold_args(&held_modifiers, true)).await {
+                return Json(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "drag".to_string(),
+                    message: format!("Could not hold the modifiers through ydotool: {message}"),
+                    received: Some(serde_json::json!(params)),
+                });
+            }
+        }
+        let modifiers = params.modifiers.join("+");
+        let output = self.drag_inner(params).await;
+        if !held_modifiers.is_empty() {
+            notes.push(
+                match run_ydotool(&modifier_hold_args(&held_modifiers, false)).await {
+                    Ok(_) => format!("Held modifiers {modifiers} around the drag."),
+                    Err(message) => format!(
+                        "WARNING: modifiers {modifiers} may still be held; releasing them failed: {message}"
+                    ),
+                },
+            );
+        }
+        if !output.0.ok {
+            return Json(with_notes(output.0, notes));
+        }
+        notes.extend(self.post_action_notes(None, None).await);
+        Json(with_notes(output.0, notes))
+    }
+
+    async fn drag_inner(&self, params: DragParams) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params));
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         // Preferred backend: the uinput absolute pointer (accurate landing).
@@ -1381,7 +1897,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "press_key",
-        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app.",
+        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Pass `key` for one key or chord, or `keys` (an array in the same grammar) to send a sequence in one call with a short delay between entries; exactly one of the two must be given. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1394,7 +1910,31 @@ impl ComputerUseLinux {
         Parameters(params): Parameters<PressKeyParams>,
     ) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params.clone()));
-        let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        if let Err(message) = self
+            .input_gate("press_key", Some(&params.window_target()))
+            .await
+        {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "press_key".to_string(),
+                message,
+                received,
+            });
+        }
+        let keys = match press_key_sequence(params.key.as_deref(), &params.keys) {
+            Ok(keys) => keys,
+            Err(message) => {
+                return Json(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "press_key".to_string(),
+                    message,
+                    received,
+                });
+            }
+        };
+        let mut input_guard = Some(Arc::clone(&self.input_operation_lock).lock_owned().await);
         let focus = match self.focus_target_for_input(&params.window_target()).await {
             Ok(focus) => focus,
             Err(message) => {
@@ -1407,14 +1947,67 @@ impl ComputerUseLinux {
                 });
             }
         };
-        let Some((chord_modifiers, chord_key)) = key_chord(&params.key) else {
-            return Json(ActionOutput {
-                ok: false,
-                implemented: true,
-                action: "press_key".to_string(),
-                message: "Unsupported key. Use names like Enter, Escape, Tab, ArrowLeft, Super, Ctrl+L, or a single US keyboard letter/digit.".to_string(),
-                received,
-            });
+        let mut last_output = None;
+        for (index, key) in keys.iter().enumerate() {
+            let guard = match input_guard.take() {
+                Some(guard) => guard,
+                None => Arc::clone(&self.input_operation_lock).lock_owned().await,
+            };
+            let (guard, mut output) = self
+                .press_key_once(key, focus.clone(), received.clone(), guard)
+                .await;
+            input_guard = guard;
+            if !output.ok {
+                if keys.len() > 1 {
+                    output.message = format!(
+                        "Key {}/{} ({key}) failed: {}",
+                        index + 1,
+                        keys.len(),
+                        output.message
+                    );
+                }
+                return Json(output);
+            }
+            last_output = Some(output);
+            if index + 1 < keys.len() {
+                sleep(KEY_SEQUENCE_DELAY).await;
+            }
+        }
+        let mut output = last_output.expect("press_key_sequence yields at least one key");
+        if keys.len() > 1 {
+            output.message = format!(
+                "Sent {} keys ({}). {}",
+                keys.len(),
+                keys.join(", "),
+                output.message
+            );
+        }
+        let notes = self.input_landing_notes(focus.as_ref(), false).await;
+        Json(with_notes(output, notes))
+    }
+
+    /// One key or chord through the best keyboard backend. Returns the input
+    /// guard when the backend handed it back so a sequence can keep it.
+    async fn press_key_once(
+        &self,
+        key: &str,
+        focus: Option<WindowFocusResult>,
+        received: Option<serde_json::Value>,
+        input_guard: tokio::sync::OwnedMutexGuard<()>,
+    ) -> (Option<tokio::sync::OwnedMutexGuard<()>>, ActionOutput) {
+        let Some((chord_modifiers, chord_key)) = key_chord(key) else {
+            return (
+                Some(input_guard),
+                ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "press_key".to_string(),
+                    message: format!(
+                        "Unsupported key {key:?}. Use names like Enter, Escape, Tab, ArrowLeft, Super, Ctrl+L, or a single US keyboard letter/digit."
+                    ),
+                    received,
+                },
+            );
         };
         if self.should_prefer_portal_keyboard_for_chords().await {
             match self.ensure_portal_keyboard_session().await {
@@ -1423,25 +2016,27 @@ impl ComputerUseLinux {
                         chord_modifiers.iter().map(|m| i32::from(*m)).collect();
                     match press_keycode_chord(&session, &modifiers, i32::from(chord_key)).await {
                         Ok(()) => {
-                            let notes = self.input_landing_notes(focus.as_ref(), false).await;
-                            return Json(with_notes(
+                            return (
+                                Some(input_guard),
                                 successful_action_with_focus(
                                     "press_key",
                                     "Action sent through the remote desktop portal.",
                                     received,
                                     focus,
                                 ),
-                                notes,
-                            ));
+                            );
                         }
                         Err(error) => {
                             self.clear_portal_keyboard_session(&session);
-                            return Json(action_result_with_focus(
-                                "press_key",
-                                Err(format!("{error:#}")),
-                                received,
-                                focus,
-                            ));
+                            return (
+                                Some(input_guard),
+                                action_result_with_focus(
+                                    "press_key",
+                                    Err(format!("{error:#}")),
+                                    received,
+                                    focus,
+                                ),
+                            );
                         }
                     }
                 }
@@ -1449,20 +2044,25 @@ impl ComputerUseLinux {
                 Err(_) => {}
             }
         }
-        let Some(key_events) = key_sequence(&params.key) else {
-            return Json(ActionOutput {
-                ok: false,
-                implemented: true,
-                action: "press_key".to_string(),
-                message: "Unsupported key. Use names like Enter, Escape, Tab, ArrowLeft, Super, Ctrl+L, or a single US keyboard letter/digit.".to_string(),
-                received,
-            });
+        let Some(key_events) = key_sequence(key) else {
+            return (
+                Some(input_guard),
+                ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "press_key".to_string(),
+                    message: format!(
+                        "Unsupported key {key:?}. Use names like Enter, Escape, Tab, ArrowLeft, Super, Ctrl+L, or a single US keyboard letter/digit."
+                    ),
+                    received,
+                },
+            );
         };
         // X11: prefer xdotool/XTEST. ydotool's raw evdev scancodes get
         // re-mapped by the active XKB layout on X11, so named keys and chords
         // arrive as stray glyphs instead of real key events (issue #58).
         if self.should_prefer_xdotool_keyboard() {
-            if let Some(spec) = xdotool_key_spec(&params.key) {
+            if let Some(spec) = xdotool_key_spec(key) {
                 let xdotool_args = vec!["key".to_string(), "--clearmodifiers".to_string(), spec];
                 let ydotool_args =
                     ydotool_key_args(key_events.clone(), !chord_modifiers.is_empty());
@@ -1473,7 +2073,6 @@ impl ComputerUseLinux {
                     .await
                 })
                 .await;
-                let _input_guard = input_guard;
                 let used_xdotool = result
                     .as_ref()
                     .is_ok_and(|result| result.backend == KeyboardCommandBackend::Xdotool);
@@ -1481,16 +2080,12 @@ impl ComputerUseLinux {
                     "press_key",
                     result.map(|result| vec![result.output]),
                     received,
-                    focus.clone(),
+                    focus,
                 );
                 if used_xdotool {
                     output.message = "Action sent through xdotool (X11 XTEST).".to_string();
                 }
-                if output.ok && focus.is_some() {
-                    let notes = self.input_landing_notes(focus.as_ref(), false).await;
-                    output = with_notes(output, notes);
-                }
-                return Json(output);
+                return (input_guard, output);
             }
         }
         let args = ydotool_key_args(key_events, !chord_modifiers.is_empty());
@@ -1498,13 +2093,10 @@ impl ComputerUseLinux {
             run_ydotool(&args).await.map(|output| vec![output])
         })
         .await;
-        let _input_guard = input_guard;
-        let mut output = action_result_with_focus("press_key", result, received, focus.clone());
-        if output.ok && focus.is_some() {
-            let notes = self.input_landing_notes(focus.as_ref(), false).await;
-            output = with_notes(output, notes);
-        }
-        Json(output)
+        (
+            input_guard,
+            action_result_with_focus("press_key", result, received, focus),
+        )
     }
 
     #[tool(
@@ -1539,6 +2131,18 @@ impl ComputerUseLinux {
         Parameters(params): Parameters<TypeTextParams>,
     ) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params.clone()));
+        if let Err(message) = self
+            .input_gate("type_text", Some(&params.window_target()))
+            .await
+        {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "type_text".to_string(),
+                message,
+                received,
+            });
+        }
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let focus = match self.focus_target_for_input(&params.window_target()).await {
             Ok(focus) => focus,
@@ -1645,7 +2249,7 @@ impl ComputerUseLinux {
             if used_xdotool {
                 output.message = "Action sent through xdotool (X11 XTEST).".to_string();
             }
-            if output.ok && focus.is_some() {
+            if output.ok {
                 let notes = self.input_landing_notes(focus.as_ref(), true).await;
                 output = with_notes(output, notes);
             }
@@ -1674,7 +2278,7 @@ impl ComputerUseLinux {
                 output.message =
                     "Action sent through wtype (Wayland virtual-keyboard protocol).".to_string();
             }
-            if output.ok && focus.is_some() {
+            if output.ok {
                 let notes = self.input_landing_notes(focus.as_ref(), true).await;
                 output = with_notes(output, notes);
             }
@@ -1689,7 +2293,7 @@ impl ComputerUseLinux {
         .await;
         let _input_guard = input_guard;
         let mut output = action_result_with_focus("type_text", result, received, focus.clone());
-        if output.ok && focus.is_some() {
+        if output.ok {
             let notes = self.input_landing_notes(focus.as_ref(), true).await;
             output = with_notes(output, notes);
         }
@@ -1749,9 +2353,37 @@ impl ComputerUseLinux {
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
     version = "0.5.0",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus — treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
+    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After click, drag, perform_action, press_key, and type_text, results append focused-element feedback from AT-SPI (role, name, editable, states) and warn when no editable element holds focus after typing — treat that warning as the input not landing; element clicks and actions also report the element's states before -> after when they changed. When an element operation answers that the cached accessibility tree is stale, call get_app_state again before retrying. wait_for polls until an element selector, a window title substring, or a focused window holds and returns the element with its index in a freshly cached tree. pointer_position reports the pointer's desktop coordinates on Hyprland and X11. The first input action of this process takes a machine-wide session lock; another server process gets ok=false naming the holder's pid. When COMPUTER_USE_LINUX_ALLOWED_APPS is set, input tools refuse windows matching none of its app_id/wm_class/title patterns. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension, Hyprland, or X11 backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
 )]
 impl ServerHandler for ComputerUseLinux {}
+
+/// The `COMPUTER_USE_LINUX_ALLOWED_APPS` patterns, or `None` when the
+/// variable is unset or blank (no restriction).
+fn allowed_app_patterns(value: Option<&str>) -> Option<Vec<String>> {
+    let patterns = value?
+        .split(',')
+        .map(str::trim)
+        .filter(|pattern| !pattern.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    (!patterns.is_empty()).then_some(patterns)
+}
+
+/// A window is allowed when any pattern is a case-insensitive substring of
+/// its app_id, wm_class, or title.
+fn window_matches_allowlist(window: &WindowInfo, patterns: &[String]) -> bool {
+    let haystacks = [
+        window.app_id.as_deref(),
+        window.wm_class.as_deref(),
+        window.title.as_deref(),
+    ];
+    patterns.iter().any(|pattern| {
+        haystacks
+            .iter()
+            .flatten()
+            .any(|value| normalized_contains(Some(value), pattern))
+    })
+}
 
 fn shell_execution_enabled() -> bool {
     shell_execution_enabled_value(env::var(SHELL_ENABLE_ENV).ok().as_deref())
@@ -2027,7 +2659,7 @@ struct FocusedWindowOutput {
     message: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct ActivateWindowParams {
     #[serde(default)]
     window_id: Option<u64>,
@@ -2150,7 +2782,7 @@ struct AppCandidate {
     command: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct GetAppStateParams {
     #[serde(default)]
     app_name_or_bundle_identifier: Option<String>,
@@ -2251,6 +2883,14 @@ struct ScreenshotParams {
     /// Capture the whole desktop even when a window is targeted (default false).
     #[serde(default)]
     full_screen: Option<bool>,
+    /// Crop to this rectangle before any resize, to zoom into small text. In
+    /// desktop coordinates, or window-relative with a window target and
+    /// `relative: true`.
+    #[serde(default)]
+    region: Option<ScreenshotRegion>,
+    /// Interpret `region` relative to the targeted window's top-left corner.
+    #[serde(default)]
+    relative: Option<bool>,
     /// Maximum returned screenshot width in pixels (default 1920, hard-capped).
     #[serde(default)]
     max_width: Option<u32>,
@@ -2307,6 +2947,223 @@ impl ScreenshotParams {
     }
 }
 
+/// `(x, y, width, height)` in pixels.
+type PixelRect = (i32, i32, u32, u32);
+
+fn occlusion_note(occluded_by: &[WindowOcclusion]) -> Option<String> {
+    if occluded_by.is_empty() {
+        return None;
+    }
+    let names = occluded_by
+        .iter()
+        .map(|window| {
+            format!(
+                "{} (window_id {})",
+                window.title.as_deref().unwrap_or("untitled"),
+                window.window_id
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "WARNING: {} window(s) overlap the target and sit above it, so their pixels appear in the crop: {names}. Raise the target (raise_window=true) or activate_window first for a clean capture.",
+        occluded_by.len()
+    ))
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct ScreenshotRegion {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+/// The rectangle a `region` request cuts out of the current capture (in that
+/// capture's pixels) and the same rectangle in desktop coordinates for the
+/// caption. `window_crop` is the desktop rectangle the capture was already
+/// cropped to, when it was.
+fn region_crop_rect(
+    region: &ScreenshotRegion,
+    relative: bool,
+    window_crop: Option<PixelRect>,
+    capture_width: u32,
+    capture_height: u32,
+) -> std::result::Result<(PixelRect, PixelRect), String> {
+    if region.width == 0 || region.height == 0 {
+        return Err("region needs a positive width and height.".to_string());
+    }
+    let (origin_x, origin_y) = match (relative, window_crop) {
+        (true, Some((x, y, _, _))) => (x, y),
+        (true, None) => {
+            return Err("relative regions need a window target.".to_string());
+        }
+        (false, _) => (0, 0),
+    };
+    let desktop_left = i64::from(origin_x) + i64::from(region.x);
+    let desktop_top = i64::from(origin_y) + i64::from(region.y);
+    let desktop_right = desktop_left + i64::from(region.width);
+    let desktop_bottom = desktop_top + i64::from(region.height);
+    let (capture_left, capture_top) = match window_crop {
+        Some((x, y, _, _)) => (i64::from(x), i64::from(y)),
+        None => (0, 0),
+    };
+    let left = (desktop_left - capture_left).max(0);
+    let top = (desktop_top - capture_top).max(0);
+    let right = (desktop_right - capture_left).min(i64::from(capture_width));
+    let bottom = (desktop_bottom - capture_top).min(i64::from(capture_height));
+    if right <= left || bottom <= top {
+        return Err(format!(
+            "region ({}, {}, {}x{}) lies outside the captured {}x{} image.",
+            region.x, region.y, region.width, region.height, capture_width, capture_height
+        ));
+    }
+    let capture_rect = (
+        left as i32,
+        top as i32,
+        (right - left) as u32,
+        (bottom - top) as u32,
+    );
+    let desktop_rect = (
+        (left + capture_left) as i32,
+        (top + capture_top) as i32,
+        capture_rect.2,
+        capture_rect.3,
+    );
+    Ok((capture_rect, desktop_rect))
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+struct PointerPositionOutput {
+    ok: bool,
+    implemented: bool,
+    backend: Option<String>,
+    x: Option<i32>,
+    y: Option<i32>,
+    message: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+struct WaitForParams {
+    #[serde(default)]
+    app_name_or_bundle_identifier: Option<String>,
+    #[serde(default)]
+    window_id: Option<u64>,
+    #[serde(default)]
+    pid: Option<u32>,
+    #[serde(default)]
+    app_id: Option<String>,
+    #[serde(default)]
+    wm_class: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    /// Element predicate: role of the awaited element (substring, case-insensitive).
+    #[serde(default)]
+    role: Option<String>,
+    /// Element predicate: accessible name (substring, case-insensitive).
+    #[serde(default)]
+    name: Option<String>,
+    /// Element predicate: text, name, or description content (substring).
+    #[serde(default)]
+    text: Option<String>,
+    /// Element predicate: AT-SPI states the element must carry.
+    #[serde(default)]
+    states: Vec<String>,
+    /// Require the matched element to hold keyboard focus.
+    #[serde(default)]
+    focused: Option<bool>,
+    /// Substring the target window's title must contain (the focused window's
+    /// title when no window target is given).
+    #[serde(default)]
+    window_title: Option<String>,
+    /// A window selector that must hold focus.
+    #[serde(default)]
+    focused_window: Option<ActivateWindowParams>,
+    /// Give up after this many milliseconds (default 5000, max 60000).
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    /// Maximum raw AT-SPI nodes to inspect per poll (default 1000, hard max 2000).
+    #[serde(default)]
+    max_nodes: Option<usize>,
+    /// Maximum AT-SPI traversal depth per poll (default 32, hard max 64).
+    #[serde(default)]
+    max_depth: Option<u32>,
+}
+
+impl WaitForParams {
+    fn selector(&self) -> ElementSelector<'_> {
+        ElementSelector {
+            role: self.role.as_deref(),
+            name: self.name.as_deref(),
+            text: self.text.as_deref(),
+            states: &self.states,
+        }
+    }
+
+    fn app_state_params(&self) -> GetAppStateParams {
+        GetAppStateParams {
+            app_name_or_bundle_identifier: self.app_name_or_bundle_identifier.clone(),
+            window_id: self.window_id,
+            pid: self.pid,
+            app_id: self.app_id.clone(),
+            wm_class: self.wm_class.clone(),
+            title: self.title.clone(),
+            ..GetAppStateParams::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+struct WaitForOutput {
+    ok: bool,
+    implemented: bool,
+    satisfied: bool,
+    elapsed_ms: u64,
+    /// The element that satisfied the selector, with its index in the tree
+    /// cached by this call.
+    element: Option<AccessibilityNode>,
+    window_context: Option<WindowInfo>,
+    focused_window: Option<WindowInfo>,
+    last_tree_summary: Option<String>,
+    message: String,
+    #[schemars(skip)]
+    received: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Default)]
+struct WaitProbe {
+    satisfied: bool,
+    element: Option<AccessibilityNode>,
+    window_context: Option<WindowInfo>,
+    focused_window: Option<WindowInfo>,
+    summary: Option<String>,
+    error: Option<String>,
+}
+
+fn wait_for_timeout(timeout_ms: Option<u64>) -> Duration {
+    Duration::from_millis(
+        timeout_ms
+            .unwrap_or(WAIT_FOR_DEFAULT_TIMEOUT_MS)
+            .min(WAIT_FOR_MAX_TIMEOUT_MS),
+    )
+}
+
+fn wait_for_has_predicate(params: &WaitForParams) -> bool {
+    !params.selector().is_empty()
+        || trimmed_nonempty(params.window_title.as_deref()).is_some()
+        || params.focused_window.is_some()
+}
+
+fn title_contains(title: Option<&str>, needle: &str) -> bool {
+    title.is_some_and(|title| normalized_contains(Some(title), needle))
+}
+
+fn node_has_state(node: &AccessibilityNode, state: &str) -> bool {
+    node.states
+        .iter()
+        .any(|node_state| normalized_equals(node_state, state))
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 struct GetAppStateOutput {
     app_name_or_bundle_identifier: Option<String>,
@@ -2331,6 +3188,10 @@ struct GetAppStateOutput {
 struct ClickParams {
     #[serde(default)]
     element_index: Option<u32>,
+    /// The `object_ref` string of a node from the latest get_app_state result,
+    /// as an alternative to element_index.
+    #[serde(default)]
+    object_ref: Option<String>,
     #[serde(default)]
     role: Option<String>,
     #[serde(default)]
@@ -2347,6 +3208,11 @@ struct ClickParams {
     button: Option<String>,
     #[serde(default)]
     click_count: Option<u32>,
+    /// Modifier keys held around the pointer click (ctrl/alt/shift/meta, the
+    /// press_key names). Forces the pointer path even when the element has an
+    /// AT-SPI click action.
+    #[serde(default)]
+    modifiers: Vec<String>,
     // Optional window target: when set, the window is raised/focused before the
     // click so a coordinate click reliably lands on the intended app rather than
     // whatever window happens to be stacked on top at that pixel.
@@ -2405,6 +3271,10 @@ impl ClickParams {
 struct ActionParams {
     #[serde(default)]
     element_index: Option<u32>,
+    /// The `object_ref` string of a node from the latest get_app_state result,
+    /// as an alternative to element_index.
+    #[serde(default)]
+    object_ref: Option<String>,
     #[serde(default)]
     element_identifier: Option<String>,
     #[serde(default)]
@@ -2434,6 +3304,10 @@ impl ActionParams {
 struct SetValueParams {
     #[serde(default)]
     element_index: Option<u32>,
+    /// The `object_ref` string of a node from the latest get_app_state result,
+    /// as an alternative to element_index.
+    #[serde(default)]
+    object_ref: Option<String>,
     #[serde(default)]
     element_identifier: Option<String>,
     #[serde(default)]
@@ -2519,11 +3393,21 @@ struct DragParams {
     start_y: i32,
     end_x: i32,
     end_y: i32,
+    /// Modifier keys held around the drag (ctrl/alt/shift/meta, the press_key
+    /// names).
+    #[serde(default)]
+    modifiers: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct PressKeyParams {
-    key: String,
+    /// One key or chord (see the tool description for the grammar).
+    #[serde(default)]
+    key: Option<String>,
+    /// A sequence of keys or chords sent in order with a short delay between
+    /// them. Exactly one of `key` and `keys` must be given.
+    #[serde(default)]
+    keys: Vec<String>,
     #[serde(default)]
     window_id: Option<u64>,
     #[serde(default)]
@@ -2544,7 +3428,7 @@ struct PressKeyParams {
     title: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct TypeTextParams {
     text: String,
     #[serde(default)]
@@ -2860,14 +3744,11 @@ impl ComputerUseLinux {
                 .filter(|window| window.window_id == focus.requested_window.window_id)
                 .ok_or_else(|| anyhow::anyhow!("focused-window verification returned no window"))?
         } else {
+            // The capture is a full-output frame cropped afterwards, so an
+            // unfocused window can be captured; whatever sits above it is
+            // reported as `occluded_by` instead of refusing.
             let windows = list_windows().await?;
-            let window = resolve_window_target(&windows, target)?.clone();
-            if !window.focused {
-                anyhow::bail!(
-                    "raise_window=false requires the requested window to already be focused"
-                );
-            }
-            window
+            resolve_window_target(&windows, target)?.clone()
         };
         if window.hidden {
             anyhow::bail!("the requested window is hidden or minimized");
@@ -3032,6 +3913,51 @@ impl ComputerUseLinux {
         candidates.into_iter().next()
     }
 
+    /// Every input tool passes here first: the machine-wide session lock, then
+    /// the `COMPUTER_USE_LINUX_ALLOWED_APPS` check against the window the
+    /// action targets (the focused window when it targets none).
+    async fn input_gate(
+        &self,
+        action: &str,
+        target: Option<&WindowTarget>,
+    ) -> std::result::Result<(), String> {
+        crate::session_lock::acquire_input_lock()?;
+        let Some(patterns) = allowed_app_patterns(env::var(ALLOWED_APPS_ENV).ok().as_deref())
+        else {
+            return Ok(());
+        };
+        let window = match target.filter(|target| target.has_target()) {
+            Some(target) => {
+                let windows = list_windows().await.map_err(|error| {
+                    format!("Refused {action}: {ALLOWED_APPS_ENV} is set but the window list is unavailable: {error:#}")
+                })?;
+                resolve_window_target(&windows, target)
+                    .map_err(|error| format!("Refused {action}: {error:#}"))?
+                    .clone()
+            }
+            None => focused_window()
+                .await
+                .map_err(|error| {
+                    format!("Refused {action}: {ALLOWED_APPS_ENV} is set but the focused window is unknown: {error:#}")
+                })?
+                .ok_or_else(|| {
+                    format!("Refused {action}: {ALLOWED_APPS_ENV} is set and no window holds focus.")
+                })?,
+        };
+        if window_matches_allowlist(&window, &patterns) {
+            Ok(())
+        } else {
+            Err(format!(
+                "Refused {action}: window_id {} (app_id {:?}, wm_class {:?}, title {:?}) matches none of the {ALLOWED_APPS_ENV} patterns [{}].",
+                window.window_id,
+                window.app_id.as_deref().unwrap_or(""),
+                window.wm_class.as_deref().unwrap_or(""),
+                window.title.as_deref().unwrap_or(""),
+                patterns.join(", ")
+            ))
+        }
+    }
+
     async fn focus_target_for_input(
         &self,
         target: &WindowTarget,
@@ -3063,6 +3989,125 @@ impl ComputerUseLinux {
                 focus.focused_window.as_ref().map(|window| window.window_id)
             ))
         }
+    }
+
+    /// One evaluation of every wait_for predicate. Stops at the first one
+    /// that does not hold and says why; a satisfied probe carries the matched
+    /// element and has already cached the tree it came from.
+    async fn probe_wait_predicates(
+        &self,
+        params: &WaitForParams,
+        app_state_params: &GetAppStateParams,
+        selector: &ElementSelector<'_>,
+    ) -> WaitProbe {
+        let mut probe = WaitProbe::default();
+        let target = app_state_params.window_target();
+        let (window_context, window_error, _) = self.resolve_window_context(app_state_params).await;
+        if target.has_target() && window_context.is_none() {
+            probe.error = window_error.or_else(|| "target window not found".to_string().into());
+            return probe;
+        }
+        probe.window_context = window_context.clone();
+
+        if let Some(needle) = trimmed_nonempty(params.window_title.as_deref()) {
+            let title_window = match window_context.as_ref() {
+                Some(window) => Some(window.clone()),
+                None => focused_window().await.ok().flatten(),
+            };
+            let title = title_window
+                .as_ref()
+                .and_then(|window| window.title.as_deref());
+            if !title_contains(title, needle) {
+                probe.error = Some(format!(
+                    "window title {} does not contain {needle:?}",
+                    title
+                        .map(|title| format!("{title:?}"))
+                        .unwrap_or_else(|| "(none)".to_string())
+                ));
+                return probe;
+            }
+        }
+
+        if let Some(selector) = params.focused_window.as_ref() {
+            let target = selector.clone().into_target();
+            let windows = match list_windows().await {
+                Ok(windows) => windows,
+                Err(error) => {
+                    probe.error = Some(format!("window listing failed: {error:#}"));
+                    return probe;
+                }
+            };
+            match resolve_window_target(&windows, &target) {
+                Ok(window) if window.focused => probe.focused_window = Some(window.clone()),
+                Ok(window) => {
+                    probe.error = Some(format!(
+                        "window_id {} ({}) does not hold focus",
+                        window.window_id,
+                        window.title.as_deref().unwrap_or("untitled")
+                    ));
+                    return probe;
+                }
+                Err(error) => {
+                    probe.error = Some(format!("{error:#}"));
+                    return probe;
+                }
+            }
+        }
+
+        if !selector.is_empty() {
+            let app_filter = self
+                .resolve_accessibility_app_filter(app_state_params, window_context.as_ref())
+                .await;
+            let (max_nodes, max_depth) = snapshot_limits(params.max_nodes, params.max_depth);
+            let target_pid = window_context
+                .as_ref()
+                .and_then(|window| window.pid)
+                .or(params.pid);
+            let nodes = match snapshot_tree(app_filter.as_deref(), target_pid, max_nodes, max_depth)
+                .await
+            {
+                Ok(nodes) => nodes,
+                Err(error) => {
+                    probe.error = Some(format!("AT-SPI tree extraction failed: {error:#}"));
+                    return probe;
+                }
+            };
+            let raw_count = nodes.len();
+            let nodes = compact_accessibility_tree(nodes);
+            let matches = nodes
+                .iter()
+                .filter(|node| node_matches_selector(node, selector))
+                .filter(|node| !params.focused.unwrap_or(false) || node_has_state(node, "focused"))
+                .cloned()
+                .collect::<Vec<_>>();
+            probe.summary = Some(format!(
+                "last tree: {} nodes (compacted from {raw_count}), {} matching {}",
+                nodes.len(),
+                matches.len(),
+                describe_selector(selector)
+            ));
+            let Some(element) =
+                resolve_semantic_node(&matches, selector, ElementResolvePurpose::Action)
+                    .ok()
+                    .or_else(|| matches.first().cloned())
+            else {
+                probe.error = Some(format!(
+                    "no element matched {}{}",
+                    describe_selector(selector),
+                    if params.focused.unwrap_or(false) {
+                        " with focus"
+                    } else {
+                        ""
+                    }
+                ));
+                return probe;
+            };
+            self.cache_tree(&nodes, window_context.as_ref());
+            probe.element = Some(element);
+        }
+
+        probe.satisfied = true;
+        probe
     }
 
     fn cache_desktop_size(&self, width: u32, height: u32) {
@@ -3184,12 +4229,13 @@ impl ComputerUseLinux {
         focus: Option<&WindowFocusResult>,
         expects_editable: bool,
     ) -> Option<String> {
-        let focus = focus?;
-        let pid = focus
-            .focused_window
-            .as_ref()
-            .and_then(|window| window.pid)
-            .or(focus.requested_window.pid);
+        let pid = focus.and_then(|focus| {
+            focus
+                .focused_window
+                .as_ref()
+                .and_then(|window| window.pid)
+                .or(focus.requested_window.pid)
+        });
         match timeout(Duration::from_millis(1500), focused_element_summary(pid)).await {
             Ok(Ok(Some(element))) => Some(describe_focused_element(&element, expects_editable)),
             Ok(Ok(None)) => Some(
@@ -3216,6 +4262,20 @@ impl ComputerUseLinux {
         F: FnOnce(crate::windowing::WindowInfo) -> Fut,
         Fut: Future<Output = Result<String>>,
     {
+        if let Err(message) = self
+            .input_gate("move_window/resize_window", Some(target))
+            .await
+        {
+            return Json(WindowGeometryOutput {
+                ok: false,
+                implemented: true,
+                backend: "unknown".to_string(),
+                window: None,
+                message,
+                permissions_hint: None,
+                received,
+            });
+        }
         let windows = match list_windows().await {
             Ok(windows) => windows,
             Err(error) => {
@@ -3313,10 +4373,143 @@ impl ComputerUseLinux {
         notes
     }
 
+    /// Feedback appended after an action landed: the focused element (as
+    /// press_key reports it) and, for an element action, the states that
+    /// changed on that element.
+    async fn post_action_notes(
+        &self,
+        focus: Option<&WindowFocusResult>,
+        element: Option<(&str, &[String])>,
+    ) -> Vec<String> {
+        // The app handles the event asynchronously; read the focus and the
+        // states after it has had a moment, or the previous state is reported.
+        sleep(POST_ACTION_SETTLE).await;
+        let mut notes = self.input_landing_notes(focus, false).await;
+        if let Some((object_ref, before)) = element {
+            if let Some(note) = element_states_note(object_ref, before).await {
+                notes.push(note);
+            }
+        }
+        notes
+    }
+
+    /// A cached element with the `focusable` and `editable` states can take
+    /// typed text even without the Value or EditableText interfaces.
+    fn cached_node_is_keyboard_editable(&self, object_ref: &str) -> bool {
+        let states = self.cached_node_states(object_ref);
+        ["focusable", "editable"]
+            .iter()
+            .all(|wanted| states.iter().any(|state| normalized_equals(state, wanted)))
+    }
+
+    /// set_value through the keyboard: focus the element with AT-SPI
+    /// GrabFocus, select everything with Ctrl+A, then type the value.
+    async fn keyboard_set_value(
+        &self,
+        object_ref: &str,
+        value: &str,
+        received: Option<serde_json::Value>,
+    ) -> Json<ActionOutput> {
+        let fail = |message: String| {
+            Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "set_value".to_string(),
+                message,
+                received: received.clone(),
+            })
+        };
+        match grab_focus(object_ref).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return fail(
+                    "The element exposes neither Value nor EditableText, and AT-SPI GrabFocus returned false, so the keyboard fallback could not focus it."
+                        .to_string(),
+                );
+            }
+            Err(error) => return fail(element_error_message(&error)),
+        }
+        sleep(Duration::from_millis(80)).await;
+        let select_all = self
+            .press_key(Parameters(PressKeyParams {
+                key: Some("ctrl+a".to_string()),
+                ..PressKeyParams::default()
+            }))
+            .await;
+        if !select_all.0.ok {
+            return fail(format!(
+                "Keyboard fallback failed at select-all: {}",
+                select_all.0.message
+            ));
+        }
+        let typed = self
+            .type_text(Parameters(TypeTextParams {
+                text: value.to_string(),
+                ..TypeTextParams::default()
+            }))
+            .await;
+        if !typed.0.ok {
+            return fail(format!(
+                "Keyboard fallback failed while typing: {}",
+                typed.0.message
+            ));
+        }
+        Json(ActionOutput {
+            ok: true,
+            implemented: true,
+            action: "set_value".to_string(),
+            message: format!(
+                "The element exposes neither Value nor EditableText, so a keyboard fallback was used: AT-SPI GrabFocus, Ctrl+A, then typed the value. {}",
+                typed.0.message
+            ),
+            received,
+        })
+    }
+
+    /// The cached element's AT-SPI action that scrolls in `direction`, if it
+    /// exposes one (GTK scrolled windows and web views name them "scroll down"
+    /// and so on).
+    fn cached_scroll_action(
+        &self,
+        element_index: u32,
+        direction: ScrollDirection,
+    ) -> Option<(String, AccessibilityAction)> {
+        let cached = self.last_nodes.lock().ok()?;
+        let node = cached.iter().find(|node| node.index == element_index)?;
+        let action = scroll_action_for_direction(&node.actions, direction)?;
+        Some((node.object_ref.clone(), action.clone()))
+    }
+
+    fn cached_node_states(&self, object_ref: &str) -> Vec<String> {
+        self.last_nodes
+            .lock()
+            .ok()
+            .and_then(|cached| {
+                cached
+                    .iter()
+                    .find(|node| node.object_ref == object_ref)
+                    .map(|node| node.states.clone())
+            })
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
     fn cache_nodes(&self, nodes: &[AccessibilityNode]) {
+        self.cache_tree(nodes, None);
+    }
+
+    fn cache_tree(&self, nodes: &[AccessibilityNode], window: Option<&WindowInfo>) {
         if let Ok(mut cached) = self.last_nodes.lock() {
             cached.clear();
             cached.extend_from_slice(nodes);
+        }
+        if let Ok(mut offset) = self.node_bounds_offset.lock() {
+            *offset = window.and_then(|window| {
+                window_relative_bounds_offset(nodes, window).map(|offset| BoundsOffset {
+                    window_id: window.window_id,
+                    offset,
+                })
+            });
         }
     }
 
@@ -3324,6 +4517,43 @@ impl ComputerUseLinux {
         if let Ok(mut cached) = self.last_nodes.lock() {
             cached.clear();
         }
+        if let Ok(mut offset) = self.node_bounds_offset.lock() {
+            *offset = None;
+        }
+    }
+
+    #[cfg(test)]
+    fn cached_bounds_offset(&self) -> Option<(i32, i32)> {
+        self.node_bounds_offset
+            .lock()
+            .ok()
+            .and_then(|offset| offset.as_ref().map(|offset| offset.offset))
+    }
+
+    /// The offset to apply to cached node bounds right now: the window's
+    /// current origin from the compositor when the window can be found (it
+    /// may have moved since the tree was cached), the cached offset otherwise.
+    async fn current_bounds_offset(&self) -> Option<(i32, i32)> {
+        let cached = self
+            .node_bounds_offset
+            .lock()
+            .ok()
+            .and_then(|offset| offset.clone())?;
+        let windows = list_windows().await.unwrap_or_default();
+        Some(fresh_bounds_offset(&cached, &windows))
+    }
+
+    /// Centre of a cached node's bounds in desktop coordinates, with the
+    /// window-origin offset applied when the tree reported window-relative
+    /// bounds.
+    fn desktop_center_for_node(
+        &self,
+        node: &AccessibilityNode,
+        offset: Option<(i32, i32)>,
+    ) -> Option<(i32, i32)> {
+        let (x, y) = bounds_center(node.bounds.as_ref()?)?;
+        let (dx, dy) = offset.unwrap_or((0, 0));
+        Some((x.checked_add(dx)?, y.checked_add(dy)?))
     }
 
     fn resolve_optional_target_point(
@@ -3331,11 +4561,12 @@ impl ComputerUseLinux {
         x: Option<i32>,
         y: Option<i32>,
         element_index: Option<u32>,
+        offset: Option<(i32, i32)>,
     ) -> std::result::Result<Option<(i32, i32)>, String> {
         match (x.zip(y), element_index) {
             (Some(point), _) => Ok(Some(point)),
             (None, Some(index)) => self
-                .center_for_cached_node(index)
+                .center_for_cached_node(index, offset)
                 .map(Some)
                 .ok_or_else(|| {
                     format!(
@@ -3349,6 +4580,7 @@ impl ComputerUseLinux {
     fn resolve_click_target(
         &self,
         params: &ClickParams,
+        offset: Option<(i32, i32)>,
     ) -> std::result::Result<ClickTarget, String> {
         if let Some((x, y)) = params.x.zip(params.y) {
             return Ok(ClickTarget::Coordinates(x, y));
@@ -3357,38 +4589,61 @@ impl ComputerUseLinux {
         let selector = params.selector();
         let node = self.resolve_cached_node(
             params.element_index,
+            params.object_ref.as_deref(),
             &selector,
             ElementResolvePurpose::Click,
         )?;
 
-        if let Some((x, y)) = node.bounds.as_ref().and_then(bounds_center) {
-            return Ok(ClickTarget::Coordinates(x, y));
-        }
+        let point = self.desktop_center_for_node(&node, offset);
+        let plain_click = is_plain_left_click(params.button.as_deref(), params.click_count);
 
-        if !is_plain_left_click(params.button.as_deref(), params.click_count) {
-            return Err(format!(
-                "No clickable bounds cached for element_index {}. Call get_app_state first and choose a node with positive width and height.",
-                node.index
-            ));
-        }
-
-        let Some(action) = primary_action(node.actions.as_slice()) else {
-            return Err(format!(
-                "No clickable bounds cached for element_index {}, and the element exposes no primary AT-SPI action.",
-                node.index
-            ));
+        // A plain left click is what the element's own `click` action does,
+        // and the action does not depend on where the window sits on the
+        // desktop, so it is tried first and the pointer is the fallback.
+        // Without bounds, any primary action is better than nothing.
+        let action = if plain_click {
+            click_action(node.actions.as_slice()).or_else(|| {
+                point
+                    .is_none()
+                    .then(|| primary_action(node.actions.as_slice()))
+                    .flatten()
+            })
+        } else {
+            None
         };
-        Ok(ClickTarget::PrimaryAction {
+
+        if point.is_none() && action.is_none() {
+            return Err(if plain_click {
+                format!(
+                    "No clickable bounds cached for element_index {}, and the element exposes no primary AT-SPI action.",
+                    node.index
+                )
+            } else {
+                format!(
+                    "No clickable bounds cached for element_index {}. Call get_app_state first and choose a node with positive width and height.",
+                    node.index
+                )
+            });
+        }
+
+        Ok(ClickTarget::Element {
+            element_index: node.index,
             object_ref: node.object_ref.clone(),
-            action_name: Some(action.name.clone()),
-            action_index: action.index,
+            action: action.cloned(),
+            point,
+            bounds_offset: point.and(offset).filter(|offset| *offset != (0, 0)),
+            states: node.states,
         })
     }
 
-    fn center_for_cached_node(&self, element_index: u32) -> Option<(i32, i32)> {
+    fn center_for_cached_node(
+        &self,
+        element_index: u32,
+        offset: Option<(i32, i32)>,
+    ) -> Option<(i32, i32)> {
         let cached = self.last_nodes.lock().ok()?;
         let node = cached.iter().find(|node| node.index == element_index)?;
-        bounds_center(node.bounds.as_ref()?)
+        self.desktop_center_for_node(node, offset)
     }
 
     fn resolve_object_ref(
@@ -3405,19 +4660,32 @@ impl ComputerUseLinux {
             return Ok(element_identifier.to_string());
         }
 
-        self.resolve_cached_node(element_index, selector, purpose)
+        self.resolve_cached_node(element_index, None, selector, purpose)
             .map(|node| node.object_ref)
     }
 
     fn resolve_cached_node(
         &self,
         element_index: Option<u32>,
+        object_ref: Option<&str>,
         selector: &ElementSelector<'_>,
         purpose: ElementResolvePurpose,
     ) -> std::result::Result<AccessibilityNode, String> {
         let cached = self.last_nodes.lock().map_err(|_| {
             "Could not read cached accessibility nodes. Call get_app_state and retry.".to_string()
         })?;
+
+        if let Some(object_ref) = object_ref.map(str::trim).filter(|value| !value.is_empty()) {
+            return cached
+                .iter()
+                .find(|node| node.object_ref == object_ref)
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "No cached accessibility node with object_ref {object_ref}. Call get_app_state first."
+                    )
+                });
+        }
 
         if let Some(element_index) = element_index {
             return cached
@@ -3449,7 +4717,10 @@ impl ComputerUseLinux {
         let received = Some(serde_json::json!(params.clone()));
         let object_ref = match self.resolve_object_ref(
             params.element_index,
-            params.element_identifier.as_deref(),
+            params
+                .element_identifier
+                .as_deref()
+                .or(params.object_ref.as_deref()),
             &params.selector(),
             ElementResolvePurpose::Action,
         ) {
@@ -3465,7 +4736,31 @@ impl ComputerUseLinux {
             }
         };
 
+        let states_before = self.cached_node_states(&object_ref);
         match invoke_accessibility_action(&object_ref, requested_action).await {
+            Ok(invocation) if invocation.ok => {
+                let notes = self
+                    .post_action_notes(None, Some((&object_ref, &states_before)))
+                    .await;
+                Json(with_notes(
+                    ActionOutput {
+                        ok: true,
+                        implemented: true,
+                        action: "perform_action".to_string(),
+                        message: format!(
+                            "AT-SPI action {} ({}) invoked.",
+                            invocation.action_index,
+                            invocation
+                                .action_name
+                                .as_deref()
+                                .filter(|name| !name.is_empty())
+                                .unwrap_or("unnamed")
+                        ),
+                        received,
+                    },
+                    notes,
+                ))
+            }
             Ok(invocation) => Json(ActionOutput {
                 ok: invocation.ok,
                 implemented: true,
@@ -3497,7 +4792,7 @@ impl ComputerUseLinux {
                 ok: false,
                 implemented: true,
                 action: "perform_action".to_string(),
-                message: error.to_string(),
+                message: element_error_message(&error),
                 received,
             }),
         }
@@ -3507,10 +4802,18 @@ impl ComputerUseLinux {
 #[derive(Debug)]
 enum ClickTarget {
     Coordinates(i32, i32),
-    PrimaryAction {
+    /// An element from the cached tree: the AT-SPI action to invoke first, if
+    /// any, and the desktop point for the pointer fallback, if it has bounds.
+    Element {
+        element_index: u32,
         object_ref: String,
-        action_name: Option<String>,
-        action_index: i32,
+        action: Option<AccessibilityAction>,
+        point: Option<(i32, i32)>,
+        /// The window-origin offset folded into `point`, when one applied.
+        bounds_offset: Option<(i32, i32)>,
+        /// The element's states when the tree was cached, for the
+        /// before -> after note.
+        states: Vec<String>,
     },
 }
 
@@ -3727,6 +5030,100 @@ fn requested_or_primary_action(action: Option<&str>) -> &str {
 
 fn primary_action(actions: &[AccessibilityAction]) -> Option<&AccessibilityAction> {
     actions.first()
+}
+
+fn parse_scroll_direction(direction: &str) -> Option<ScrollDirection> {
+    match direction.trim().to_ascii_lowercase().as_str() {
+        "up" => Some(ScrollDirection::Up),
+        "down" => Some(ScrollDirection::Down),
+        "left" => Some(ScrollDirection::Left),
+        "right" => Some(ScrollDirection::Right),
+        _ => None,
+    }
+}
+
+/// An action named like "scroll down" / "scrollDown" / "scroll-down" for the
+/// direction, matched on the normalized name.
+fn scroll_action_for_direction(
+    actions: &[AccessibilityAction],
+    direction: ScrollDirection,
+) -> Option<&AccessibilityAction> {
+    let word = match direction {
+        ScrollDirection::Up => "up",
+        ScrollDirection::Down => "down",
+        ScrollDirection::Left => "left",
+        ScrollDirection::Right => "right",
+    };
+    actions.iter().find(|action| {
+        let name = normalize_text(&action.name);
+        name.contains("scroll") && name.contains(word)
+    })
+}
+
+fn click_action(actions: &[AccessibilityAction]) -> Option<&AccessibilityAction> {
+    actions
+        .iter()
+        .find(|action| action.name.trim().eq_ignore_ascii_case("click"))
+}
+
+/// Offset that maps the tree's node bounds onto the desktop, or `None` when
+/// the bounds already are desktop coordinates.
+///
+/// The tree reads extents with `CoordType::Screen`, but an accesskit-backed
+/// app (GPUI, winit) answers that relative to the window: accesskit's AT-SPI
+/// adapter adds the root window origin the app registered through
+/// `set_root_window_bounds`, and on Wayland no app registers one because a
+/// Wayland client is never told where it sits, so the origin stays at (0, 0).
+/// The signature is a top-level frame that reports no desktop origin, either
+/// extents starting at (0, 0) or no bounds at all (GPUI's Frame answers
+/// `GetExtents` with nothing usable), while the compositor places the window
+/// elsewhere. The compositor backend is the only source of the real origin, so
+/// its window bounds supply the offset. A frame that reports a real non-zero
+/// origin (GTK, Qt) gets no offset. A window at the desktop origin yields
+/// `(0, 0)`, which still records that the tree follows the window.
+fn window_relative_bounds_offset(
+    nodes: &[AccessibilityNode],
+    window: &WindowInfo,
+) -> Option<(i32, i32)> {
+    let frame = nodes
+        .iter()
+        .filter(|node| is_top_level_frame_role(&node.role))
+        .min_by_key(|node| node.depth)?;
+    if frame
+        .bounds
+        .as_ref()
+        .is_some_and(|bounds| bounds.x != 0 || bounds.y != 0)
+    {
+        return None;
+    }
+    let window_bounds = window.bounds.as_ref()?;
+    Some((window_bounds.x?, window_bounds.y?))
+}
+
+/// The window a window-relative tree belongs to and the origin it had when
+/// the tree was cached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BoundsOffset {
+    window_id: u64,
+    offset: (i32, i32),
+}
+
+/// The window's origin as the compositor reports it now, or the cached one
+/// when the window is no longer listed or has no position.
+fn fresh_bounds_offset(cached: &BoundsOffset, windows: &[WindowInfo]) -> (i32, i32) {
+    windows
+        .iter()
+        .find(|window| window.window_id == cached.window_id)
+        .and_then(|window| window.bounds.as_ref())
+        .and_then(|bounds| bounds.x.zip(bounds.y))
+        .unwrap_or(cached.offset)
+}
+
+fn is_top_level_frame_role(role: &str) -> bool {
+    matches!(
+        role.trim().to_ascii_lowercase().as_str(),
+        "frame" | "window" | "dialog"
+    )
 }
 
 fn primary_action_name(actions: &[AccessibilityAction]) -> Option<String> {
@@ -4348,15 +5745,68 @@ fn describe_focused_element(element: &FocusedElementSummary, expects_editable: b
         .filter(|name| !name.is_empty())
         .map(|name| format!(" \"{name}\""))
         .unwrap_or_default();
-    if element.editable {
-        format!("Focused element: {}{name} (editable).", element.role)
+    // An element is editable when it implements the EditableText interface
+    // or carries the `editable` state. GPUI (accesskit_unix) text inputs set
+    // the state without the interface, and typed text does land in them.
+    let editable = element.editable
+        || element
+            .states
+            .iter()
+            .any(|state| state.eq_ignore_ascii_case("editable"));
+    let states = if element.states.is_empty() {
+        String::new()
+    } else {
+        format!("; states: {}", element.states.join(", "))
+    };
+    if editable {
+        format!(
+            "Focused element: {}{name} (editable{states}).",
+            element.role
+        )
     } else if expects_editable {
         format!(
-            "WARNING: focused element is {}{name}, which is not editable — the typed text likely went nowhere. Click the intended input first or use set_value.",
+            "WARNING: focused element is {}{name}, which is not editable{states} — the typed text likely went nowhere. Click the intended input first or use set_value.",
             element.role
         )
     } else {
-        format!("Focused element: {}{name} (not editable).", element.role)
+        format!(
+            "Focused element: {}{name} (not editable{states}).",
+            element.role
+        )
+    }
+}
+
+/// "element states before -> after" when an element action changed them.
+fn states_change_note(before: &[String], after: &[String]) -> Option<String> {
+    let mut sorted_before = before.to_vec();
+    let mut sorted_after = after.to_vec();
+    sorted_before.sort_unstable();
+    sorted_after.sort_unstable();
+    if sorted_before == sorted_after {
+        return None;
+    }
+    Some(format!(
+        "Element states before -> after: [{}] -> [{}].",
+        sorted_before.join(", "),
+        sorted_after.join(", ")
+    ))
+}
+
+async fn element_states_note(object_ref: &str, before: &[String]) -> Option<String> {
+    let after = timeout(Duration::from_millis(1500), element_states(object_ref))
+        .await
+        .ok()?
+        .ok()?;
+    states_change_note(before, &after)
+}
+
+/// The message for a failed element operation: the stale-tree hint when the
+/// object's owner left the bus, the error itself otherwise.
+fn element_error_message(error: &anyhow::Error) -> String {
+    if is_stale_object_error(error) {
+        STALE_TREE_MESSAGE.to_string()
+    } else {
+        error.to_string()
     }
 }
 
@@ -4486,6 +5936,22 @@ where
             outputs: vec![output],
             backend: KeyboardCommandBackend::Xdotool,
         }),
+    }
+}
+
+/// Map a semantic scroll direction to the `(dx, dy)` pair for
+/// `ydotool mousemove --wheel`, which emits `dx` as `REL_HWHEEL` and `dy` as
+/// `REL_WHEEL`. The two evdev axes are not symmetric: positive `REL_WHEEL`
+/// is "wheel up" (content scrolls up), while positive `REL_HWHEEL` is "scroll
+/// right" (content scrolls right). Verified on Hyprland 2026-09-04: `right`
+/// sent as a negative `REL_HWHEEL` never moved a horizontal scroll area and
+/// `left` moved it the wrong way.
+fn ydotool_wheel_delta(direction: ScrollDirection, units: i32) -> (i32, i32) {
+    match direction {
+        ScrollDirection::Up => (0, units),
+        ScrollDirection::Down => (0, -units),
+        ScrollDirection::Left => (-units, 0),
+        ScrollDirection::Right => (units, 0),
     }
 }
 
@@ -5129,6 +6595,48 @@ fn key_sequence(key: &str) -> Option<Vec<String>> {
         events.push(format!("{modifier}:0"));
     }
     Some(events)
+}
+
+/// The keys press_key sends, from exactly one of `key` and `keys`.
+fn press_key_sequence(
+    key: Option<&str>,
+    keys: &[String],
+) -> std::result::Result<Vec<String>, String> {
+    let key = key.map(str::trim).filter(|value| !value.is_empty());
+    let keys = keys
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    match (key, keys.is_empty()) {
+        (Some(key), true) => Ok(vec![key.to_string()]),
+        (None, false) => Ok(keys),
+        (Some(_), false) => Err("Pass either key or keys, not both.".to_string()),
+        (None, true) => Err("Pass key (one key or chord) or keys (a sequence).".to_string()),
+    }
+}
+
+/// Evdev codes for the modifier names click/drag hold around a pointer action.
+fn modifier_keycodes(modifiers: &[String]) -> std::result::Result<Vec<u16>, String> {
+    let mut codes = Vec::new();
+    for modifier in modifiers {
+        let code = modifier_keycode(modifier).ok_or_else(|| {
+            format!("Unsupported modifier {modifier:?}; use ctrl, alt, shift, or meta.")
+        })?;
+        if !codes.contains(&code) {
+            codes.push(code);
+        }
+    }
+    Ok(codes)
+}
+
+/// `ydotool key` arguments that press (`pressed`) or release every modifier.
+fn modifier_hold_args(codes: &[u16], pressed: bool) -> Vec<String> {
+    let state = u8::from(pressed);
+    let mut args = vec!["key".to_string()];
+    args.extend(codes.iter().map(|code| format!("{code}:{state}")));
+    args
 }
 
 fn ydotool_key_args(key_events: Vec<String>, has_modifiers: bool) -> Vec<String> {
@@ -5994,7 +7502,7 @@ mod tests {
         )]);
 
         let point = backend
-            .resolve_optional_target_point(None, None, Some(7))
+            .resolve_optional_target_point(None, None, Some(7), backend.cached_bounds_offset())
             .unwrap()
             .unwrap();
 
@@ -6015,7 +7523,12 @@ mod tests {
         )]);
 
         let point = backend
-            .resolve_optional_target_point(Some(200), Some(300), Some(7))
+            .resolve_optional_target_point(
+                Some(200),
+                Some(300),
+                Some(7),
+                backend.cached_bounds_offset(),
+            )
             .unwrap()
             .unwrap();
 
@@ -6036,7 +7549,7 @@ mod tests {
         )]);
 
         let error = backend
-            .resolve_optional_target_point(None, None, Some(7))
+            .resolve_optional_target_point(None, None, Some(7), backend.cached_bounds_offset())
             .unwrap_err();
 
         assert!(error.contains("No clickable bounds cached for element_index 7"));
@@ -6056,7 +7569,7 @@ mod tests {
         )]);
 
         let error = backend
-            .resolve_optional_target_point(None, None, Some(7))
+            .resolve_optional_target_point(None, None, Some(7), backend.cached_bounds_offset())
             .unwrap_err();
 
         assert!(error.contains("No clickable bounds cached for element_index 7"));
@@ -6077,7 +7590,7 @@ mod tests {
         backend.cache_nodes(&[]);
 
         let error = backend
-            .resolve_optional_target_point(None, None, Some(7))
+            .resolve_optional_target_point(None, None, Some(7), backend.cached_bounds_offset())
             .unwrap_err();
 
         assert!(error.contains("No clickable bounds cached for element_index 7"));
@@ -6098,21 +7611,31 @@ mod tests {
         )]);
 
         let target = backend
-            .resolve_click_target(&ClickParams {
-                element_index: Some(7),
-                ..Default::default()
-            })
+            .resolve_click_target(
+                &ClickParams {
+                    element_index: Some(7),
+                    ..Default::default()
+                },
+                backend.cached_bounds_offset(),
+            )
             .unwrap();
 
         match target {
-            ClickTarget::PrimaryAction {
+            ClickTarget::Element {
+                element_index,
                 object_ref,
-                action_name,
-                action_index,
+                action,
+                point,
+                bounds_offset,
+                ..
             } => {
+                assert_eq!(element_index, 7);
                 assert_eq!(object_ref, ":1.7/org/a11y/atspi/accessible/7");
-                assert_eq!(action_name.as_deref(), Some("Click"));
-                assert_eq!(action_index, 0);
+                let action = action.expect("primary action");
+                assert_eq!(action.name, "Click");
+                assert_eq!(action.index, 0);
+                assert_eq!(point, None);
+                assert_eq!(bounds_offset, None);
             }
             ClickTarget::Coordinates(_, _) => {
                 panic!("expected AT-SPI primary-action fallback")
@@ -6140,21 +7663,31 @@ mod tests {
         )]);
 
         let target = backend
-            .resolve_click_target(&ClickParams {
-                element_index: Some(7),
-                ..Default::default()
-            })
+            .resolve_click_target(
+                &ClickParams {
+                    element_index: Some(7),
+                    ..Default::default()
+                },
+                backend.cached_bounds_offset(),
+            )
             .unwrap();
 
         match target {
-            ClickTarget::PrimaryAction {
+            ClickTarget::Element {
+                element_index,
                 object_ref,
-                action_name,
-                action_index,
+                action,
+                point,
+                bounds_offset,
+                ..
             } => {
+                assert_eq!(element_index, 7);
                 assert_eq!(object_ref, ":1.7/org/a11y/atspi/accessible/7");
-                assert_eq!(action_name.as_deref(), Some("Click"));
-                assert_eq!(action_index, 0);
+                let action = action.expect("primary action");
+                assert_eq!(action.name, "Click");
+                assert_eq!(action.index, 0);
+                assert_eq!(point, None);
+                assert_eq!(bounds_offset, None);
             }
             ClickTarget::Coordinates(_, _) => {
                 panic!("expected AT-SPI primary-action fallback")
@@ -6177,14 +7710,754 @@ mod tests {
         )]);
 
         let error = backend
-            .resolve_click_target(&ClickParams {
-                element_index: Some(7),
-                button: Some("right".to_string()),
-                ..Default::default()
-            })
+            .resolve_click_target(
+                &ClickParams {
+                    element_index: Some(7),
+                    button: Some("right".to_string()),
+                    ..Default::default()
+                },
+                backend.cached_bounds_offset(),
+            )
             .unwrap_err();
 
         assert!(error.contains("No clickable bounds cached for element_index 7"));
+    }
+
+    #[test]
+    fn click_target_prefers_click_action_over_primary_action() {
+        let backend = ComputerUseLinux::default();
+        backend.cache_nodes(&[node_with_actions(
+            7,
+            Some(Bounds {
+                x: 10,
+                y: 20,
+                width: 100,
+                height: 40,
+            }),
+            vec![
+                AccessibilityAction {
+                    index: 0,
+                    name: "focus".to_string(),
+                    description: String::new(),
+                    keybinding: String::new(),
+                },
+                AccessibilityAction {
+                    index: 1,
+                    name: "click".to_string(),
+                    description: String::new(),
+                    keybinding: String::new(),
+                },
+            ],
+        )]);
+
+        let target = backend
+            .resolve_click_target(
+                &ClickParams {
+                    element_index: Some(7),
+                    ..Default::default()
+                },
+                backend.cached_bounds_offset(),
+            )
+            .unwrap();
+
+        let ClickTarget::Element { action, point, .. } = target else {
+            panic!("expected an element click target");
+        };
+        assert_eq!(action.map(|action| action.index), Some(1));
+        assert_eq!(point, Some((60, 40)));
+    }
+
+    #[test]
+    fn click_target_with_bounds_skips_non_click_primary_action() {
+        let backend = ComputerUseLinux::default();
+        backend.cache_nodes(&[node_with_actions(
+            7,
+            Some(Bounds {
+                x: 10,
+                y: 20,
+                width: 100,
+                height: 40,
+            }),
+            vec![AccessibilityAction {
+                index: 0,
+                name: "focus".to_string(),
+                description: String::new(),
+                keybinding: String::new(),
+            }],
+        )]);
+
+        let target = backend
+            .resolve_click_target(
+                &ClickParams {
+                    element_index: Some(7),
+                    ..Default::default()
+                },
+                backend.cached_bounds_offset(),
+            )
+            .unwrap();
+
+        let ClickTarget::Element { action, point, .. } = target else {
+            panic!("expected an element click target");
+        };
+        assert!(action.is_none());
+        assert_eq!(point, Some((60, 40)));
+    }
+
+    #[test]
+    fn non_plain_click_never_uses_the_atspi_action() {
+        let backend = ComputerUseLinux::default();
+        backend.cache_nodes(&[node_with_actions(
+            7,
+            Some(Bounds {
+                x: 10,
+                y: 20,
+                width: 100,
+                height: 40,
+            }),
+            vec![click_action()],
+        )]);
+
+        let target = backend
+            .resolve_click_target(
+                &ClickParams {
+                    element_index: Some(7),
+                    click_count: Some(2),
+                    ..Default::default()
+                },
+                backend.cached_bounds_offset(),
+            )
+            .unwrap();
+
+        let ClickTarget::Element { action, point, .. } = target else {
+            panic!("expected an element click target");
+        };
+        assert!(action.is_none());
+        assert_eq!(point, Some((60, 40)));
+    }
+
+    fn frame_node(index: u32, bounds: Bounds) -> AccessibilityNode {
+        let mut frame = node(index, Some(bounds));
+        frame.role = "frame".to_string();
+        frame
+    }
+
+    fn placed_window(x: Option<i32>, y: Option<i32>) -> WindowInfo {
+        let mut window = window_info(1, Some("Sophia"), Some("sophia"), None, Some(4242));
+        window.bounds = Some(WindowBounds {
+            x,
+            y,
+            width: 900,
+            height: 700,
+        });
+        window
+    }
+
+    #[test]
+    fn window_relative_tree_is_offset_by_the_window_origin() {
+        let nodes = [
+            frame_node(
+                0,
+                Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 900,
+                    height: 700,
+                },
+            ),
+            node_with_actions(
+                1,
+                Some(Bounds {
+                    x: 8,
+                    y: 151,
+                    width: 191,
+                    height: 24,
+                }),
+                vec![click_action()],
+            ),
+        ];
+        let window = placed_window(Some(965), Some(48));
+
+        assert_eq!(
+            window_relative_bounds_offset(&nodes, &window),
+            Some((965, 48))
+        );
+
+        let backend = ComputerUseLinux::default();
+        backend.cache_tree(&nodes, Some(&window));
+
+        let target = backend
+            .resolve_click_target(
+                &ClickParams {
+                    element_index: Some(1),
+                    ..Default::default()
+                },
+                backend.cached_bounds_offset(),
+            )
+            .unwrap();
+        let ClickTarget::Element {
+            point,
+            bounds_offset,
+            ..
+        } = target
+        else {
+            panic!("expected an element click target");
+        };
+        assert_eq!(point, Some((965 + 103, 48 + 163)));
+        assert_eq!(bounds_offset, Some((965, 48)));
+        assert_eq!(
+            backend
+                .resolve_optional_target_point(None, None, Some(1), backend.cached_bounds_offset())
+                .unwrap(),
+            Some((965 + 103, 48 + 163))
+        );
+    }
+
+    #[test]
+    fn frame_without_bounds_is_treated_as_window_relative() {
+        let mut frame = node(1, None);
+        frame.role = "Frame".to_string();
+        frame.depth = 1;
+        frame.name = Some("sophia-ui".to_string());
+        let nodes = [
+            frame,
+            node_with_actions(
+                2,
+                Some(Bounds {
+                    x: 8,
+                    y: 151,
+                    width: 191,
+                    height: 24,
+                }),
+                vec![click_action()],
+            ),
+        ];
+
+        assert_eq!(
+            window_relative_bounds_offset(&nodes, &placed_window(Some(965), Some(48))),
+            Some((965, 48))
+        );
+    }
+
+    #[test]
+    fn element_points_follow_the_window_after_it_moves() {
+        let nodes = [
+            frame_node(
+                0,
+                Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 900,
+                    height: 700,
+                },
+            ),
+            node_with_actions(
+                1,
+                Some(Bounds {
+                    x: 8,
+                    y: 151,
+                    width: 191,
+                    height: 24,
+                }),
+                vec![click_action()],
+            ),
+        ];
+        let backend = ComputerUseLinux::default();
+        backend.cache_tree(&nodes, Some(&placed_window(Some(965), Some(48))));
+        let cached = backend.node_bounds_offset.lock().unwrap().clone().unwrap();
+        assert_eq!(cached.window_id, 1);
+        assert_eq!(cached.offset, (965, 48));
+
+        let moved = placed_window(Some(1182), Some(419));
+        let offset = fresh_bounds_offset(&cached, std::slice::from_ref(&moved));
+        assert_eq!(offset, (1182, 419));
+        assert_eq!(fresh_bounds_offset(&cached, &[]), (965, 48));
+        assert_eq!(
+            fresh_bounds_offset(&cached, &[placed_window(None, None)]),
+            (965, 48)
+        );
+
+        let target = backend
+            .resolve_click_target(
+                &ClickParams {
+                    element_index: Some(1),
+                    ..Default::default()
+                },
+                Some(offset),
+            )
+            .unwrap();
+        let ClickTarget::Element {
+            point,
+            bounds_offset,
+            ..
+        } = target
+        else {
+            panic!("expected an element click target");
+        };
+        assert_eq!(point, Some((1182 + 103, 419 + 163)));
+        assert_eq!(bounds_offset, Some((1182, 419)));
+        assert_eq!(
+            backend
+                .resolve_optional_target_point(None, None, Some(1), Some(offset))
+                .unwrap(),
+            Some((1285, 582))
+        );
+    }
+
+    #[test]
+    fn desktop_relative_tree_gets_no_offset() {
+        let nodes = [
+            frame_node(
+                0,
+                Bounds {
+                    x: 965,
+                    y: 48,
+                    width: 900,
+                    height: 700,
+                },
+            ),
+            node(
+                1,
+                Some(Bounds {
+                    x: 973,
+                    y: 199,
+                    width: 191,
+                    height: 24,
+                }),
+            ),
+        ];
+        let window = placed_window(Some(965), Some(48));
+
+        assert_eq!(window_relative_bounds_offset(&nodes, &window), None);
+
+        let backend = ComputerUseLinux::default();
+        backend.cache_tree(&nodes, Some(&window));
+        assert_eq!(
+            backend
+                .resolve_optional_target_point(None, None, Some(1), backend.cached_bounds_offset())
+                .unwrap(),
+            Some((1068, 211))
+        );
+    }
+
+    #[test]
+    fn window_relative_tree_needs_a_window_origin_and_a_frame() {
+        let frame = frame_node(
+            0,
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 900,
+                height: 700,
+            },
+        );
+        let button = node(
+            1,
+            Some(Bounds {
+                x: 8,
+                y: 151,
+                width: 191,
+                height: 24,
+            }),
+        );
+
+        assert_eq!(
+            window_relative_bounds_offset(
+                std::slice::from_ref(&button),
+                &placed_window(Some(965), Some(48))
+            ),
+            None
+        );
+        assert_eq!(
+            window_relative_bounds_offset(
+                &[frame.clone(), button.clone()],
+                &placed_window(None, None)
+            ),
+            None
+        );
+        assert_eq!(
+            window_relative_bounds_offset(&[frame, button], &placed_window(Some(0), Some(0))),
+            Some((0, 0))
+        );
+    }
+
+    #[test]
+    fn click_target_resolves_by_object_ref() {
+        let backend = ComputerUseLinux::default();
+        backend.cache_nodes(&[
+            node(3, None),
+            node_with_actions(
+                7,
+                Some(Bounds {
+                    x: 10,
+                    y: 20,
+                    width: 100,
+                    height: 40,
+                }),
+                vec![click_action()],
+            ),
+        ]);
+
+        let target = backend
+            .resolve_click_target(
+                &ClickParams {
+                    object_ref: Some(":1.7/org/a11y/atspi/accessible/7".to_string()),
+                    ..Default::default()
+                },
+                backend.cached_bounds_offset(),
+            )
+            .unwrap();
+        let ClickTarget::Element {
+            element_index,
+            point,
+            ..
+        } = target
+        else {
+            panic!("expected an element click target");
+        };
+        assert_eq!(element_index, 7);
+        assert_eq!(point, Some((60, 40)));
+
+        let error = backend
+            .resolve_click_target(
+                &ClickParams {
+                    object_ref: Some(":1.9/org/a11y/atspi/accessible/9".to_string()),
+                    ..Default::default()
+                },
+                backend.cached_bounds_offset(),
+            )
+            .unwrap_err();
+        assert!(error.contains("No cached accessibility node with object_ref"));
+    }
+
+    #[test]
+    fn stale_element_errors_get_the_refresh_hint() {
+        let stale = anyhow::anyhow!(
+            "org.freedesktop.DBus.Error.ServiceUnknown: The name :1.42 was not provided by any .service files"
+        );
+        assert_eq!(element_error_message(&stale), STALE_TREE_MESSAGE);
+        let other = anyhow::anyhow!("element exposes no AT-SPI actions");
+        assert_eq!(element_error_message(&other), other.to_string());
+    }
+
+    #[test]
+    fn states_change_note_ignores_order_and_reports_changes() {
+        assert_eq!(
+            states_change_note(
+                &["focused".to_string(), "enabled".to_string()],
+                &["enabled".to_string(), "focused".to_string()]
+            ),
+            None
+        );
+        let note = states_change_note(
+            &["enabled".to_string()],
+            &["enabled".to_string(), "checked".to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            note,
+            "Element states before -> after: [enabled] -> [checked, enabled]."
+        );
+    }
+
+    #[test]
+    fn describe_focused_element_lists_states() {
+        let element = FocusedElementSummary {
+            role: "entry".to_string(),
+            name: None,
+            editable: true,
+            states: vec!["focused".to_string(), "editable".to_string()],
+        };
+        assert_eq!(
+            describe_focused_element(&element, true),
+            "Focused element: entry (editable; states: focused, editable)."
+        );
+    }
+
+    #[test]
+    fn press_key_sequence_takes_exactly_one_of_key_and_keys() {
+        assert_eq!(
+            press_key_sequence(Some("ctrl+l"), &[]).unwrap(),
+            vec!["ctrl+l".to_string()]
+        );
+        assert_eq!(
+            press_key_sequence(
+                None,
+                &["ctrl+a".to_string(), " ".to_string(), "Delete".to_string()]
+            )
+            .unwrap(),
+            vec!["ctrl+a".to_string(), "Delete".to_string()]
+        );
+        assert!(press_key_sequence(Some("enter"), &["tab".to_string()]).is_err());
+        assert!(press_key_sequence(None, &[]).is_err());
+        assert!(press_key_sequence(Some("  "), &[]).is_err());
+    }
+
+    #[test]
+    fn modifier_hold_args_press_and_release_evdev_codes() {
+        let codes =
+            modifier_keycodes(&["ctrl".to_string(), "Shift".to_string(), "ctrl".to_string()])
+                .unwrap();
+        assert_eq!(codes, vec![29, 42]);
+        assert_eq!(
+            modifier_hold_args(&codes, true),
+            vec!["key".to_string(), "29:1".to_string(), "42:1".to_string()]
+        );
+        assert_eq!(
+            modifier_hold_args(&codes, false),
+            vec!["key".to_string(), "29:0".to_string(), "42:0".to_string()]
+        );
+        assert!(modifier_keycodes(&["hyper".to_string()]).is_err());
+        assert!(modifier_keycodes(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn region_crop_maps_desktop_and_window_relative_rectangles() {
+        let region = ScreenshotRegion {
+            x: 10,
+            y: 20,
+            width: 100,
+            height: 50,
+        };
+        assert_eq!(
+            region_crop_rect(&region, false, None, 1920, 1080).unwrap(),
+            ((10, 20, 100, 50), (10, 20, 100, 50))
+        );
+        let window = Some((965, 48, 900, 700));
+        assert_eq!(
+            region_crop_rect(&region, true, window, 900, 700).unwrap(),
+            ((10, 20, 100, 50), (975, 68, 100, 50))
+        );
+        assert_eq!(
+            region_crop_rect(
+                &ScreenshotRegion {
+                    x: 975,
+                    y: 68,
+                    width: 100,
+                    height: 50
+                },
+                false,
+                window,
+                900,
+                700
+            )
+            .unwrap(),
+            ((10, 20, 100, 50), (975, 68, 100, 50))
+        );
+    }
+
+    #[test]
+    fn region_crop_clips_and_rejects_empty_rectangles() {
+        let region = ScreenshotRegion {
+            x: 1900,
+            y: 1070,
+            width: 100,
+            height: 50,
+        };
+        assert_eq!(
+            region_crop_rect(&region, false, None, 1920, 1080).unwrap(),
+            ((1900, 1070, 20, 10), (1900, 1070, 20, 10))
+        );
+        assert!(region_crop_rect(&region, true, None, 1920, 1080)
+            .unwrap_err()
+            .contains("window target"));
+        let outside = ScreenshotRegion {
+            x: 5000,
+            y: 0,
+            width: 10,
+            height: 10,
+        };
+        assert!(region_crop_rect(&outside, false, None, 1920, 1080)
+            .unwrap_err()
+            .contains("outside"));
+        let empty = ScreenshotRegion {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 10,
+        };
+        assert!(region_crop_rect(&empty, false, None, 1920, 1080).is_err());
+    }
+
+    #[test]
+    fn occlusion_note_names_the_windows_above() {
+        assert_eq!(occlusion_note(&[]), None);
+        let note = occlusion_note(&[
+            WindowOcclusion {
+                window_id: 0x10,
+                title: Some("Terminal".to_string()),
+            },
+            WindowOcclusion {
+                window_id: 0x20,
+                title: None,
+            },
+        ])
+        .unwrap();
+        assert!(note.starts_with("WARNING: 2 window(s)"));
+        assert!(note.contains("Terminal (window_id 16)"));
+        assert!(note.contains("untitled (window_id 32)"));
+    }
+
+    #[test]
+    fn allowed_app_patterns_split_and_ignore_blanks() {
+        assert_eq!(allowed_app_patterns(None), None);
+        assert_eq!(allowed_app_patterns(Some("  , ")), None);
+        assert_eq!(
+            allowed_app_patterns(Some("sophia, Ghostty ,,firefox")),
+            Some(vec![
+                "sophia".to_string(),
+                "Ghostty".to_string(),
+                "firefox".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn allowlist_matches_app_id_wm_class_or_title_substrings() {
+        let window = window_info(
+            1,
+            Some("Sophia — main.rs"),
+            Some("sophia-ui"),
+            Some("Sophia"),
+            Some(1),
+        );
+        assert!(window_matches_allowlist(&window, &["SOPHIA".to_string()]));
+        assert!(window_matches_allowlist(&window, &["main.rs".to_string()]));
+        assert!(!window_matches_allowlist(&window, &["ghostty".to_string()]));
+        let untitled = window_info(2, None, None, None, None);
+        assert!(!window_matches_allowlist(
+            &untitled,
+            &["sophia".to_string()]
+        ));
+    }
+
+    #[test]
+    fn scroll_actions_match_direction_names_loosely() {
+        let actions = vec![
+            AccessibilityAction {
+                index: 0,
+                name: "click".to_string(),
+                description: String::new(),
+                keybinding: String::new(),
+            },
+            AccessibilityAction {
+                index: 1,
+                name: "scrollDown".to_string(),
+                description: String::new(),
+                keybinding: String::new(),
+            },
+            AccessibilityAction {
+                index: 2,
+                name: "Scroll left".to_string(),
+                description: String::new(),
+                keybinding: String::new(),
+            },
+        ];
+        assert_eq!(
+            scroll_action_for_direction(&actions, ScrollDirection::Down).map(|action| action.index),
+            Some(1)
+        );
+        assert_eq!(
+            scroll_action_for_direction(&actions, ScrollDirection::Left).map(|action| action.index),
+            Some(2)
+        );
+        assert!(scroll_action_for_direction(&actions, ScrollDirection::Up).is_none());
+        assert!(matches!(
+            parse_scroll_direction(" Right "),
+            Some(ScrollDirection::Right)
+        ));
+        assert!(parse_scroll_direction("sideways").is_none());
+
+        let backend = ComputerUseLinux::default();
+        backend.cache_nodes(&[node_with_actions(4, None, actions)]);
+        let (object_ref, action) = backend
+            .cached_scroll_action(4, ScrollDirection::Down)
+            .unwrap();
+        assert_eq!(object_ref, ":1.4/org/a11y/atspi/accessible/4");
+        assert_eq!(action.index, 1);
+        assert!(backend
+            .cached_scroll_action(4, ScrollDirection::Up)
+            .is_none());
+    }
+
+    #[test]
+    fn keyboard_editable_needs_focusable_and_editable_states() {
+        let backend = ComputerUseLinux::default();
+        let mut entry = node(1, None);
+        entry.states = vec!["focusable".to_string(), "Editable".to_string()];
+        let mut label = node(2, None);
+        label.states = vec!["editable".to_string()];
+        backend.cache_nodes(&[entry, label]);
+
+        assert!(backend.cached_node_is_keyboard_editable(":1.1/org/a11y/atspi/accessible/1"));
+        assert!(!backend.cached_node_is_keyboard_editable(":1.2/org/a11y/atspi/accessible/2"));
+        assert!(!backend.cached_node_is_keyboard_editable(":1.9/org/a11y/atspi/accessible/9"));
+    }
+
+    #[test]
+    fn wait_for_timeout_defaults_and_caps() {
+        assert_eq!(wait_for_timeout(None), Duration::from_millis(5_000));
+        assert_eq!(wait_for_timeout(Some(250)), Duration::from_millis(250));
+        assert_eq!(
+            wait_for_timeout(Some(600_000)),
+            Duration::from_millis(60_000)
+        );
+    }
+
+    #[test]
+    fn wait_for_requires_a_predicate() {
+        assert!(!wait_for_has_predicate(&WaitForParams::default()));
+        assert!(!wait_for_has_predicate(&WaitForParams {
+            pid: Some(42),
+            window_title: Some("   ".to_string()),
+            ..Default::default()
+        }));
+        assert!(wait_for_has_predicate(&WaitForParams {
+            role: Some("button".to_string()),
+            ..Default::default()
+        }));
+        assert!(wait_for_has_predicate(&WaitForParams {
+            window_title: Some("Sophia".to_string()),
+            ..Default::default()
+        }));
+        assert!(wait_for_has_predicate(&WaitForParams {
+            focused_window: Some(ActivateWindowParams::default()),
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn wait_for_title_and_state_predicates_normalize() {
+        assert!(title_contains(Some("Sophia — main.rs"), "sophia"));
+        assert!(!title_contains(Some("Sophia"), "zed"));
+        assert!(!title_contains(None, "sophia"));
+
+        let mut focused = node(1, None);
+        focused.states = vec!["Focused".to_string(), "editable".to_string()];
+        assert!(node_has_state(&focused, "focused"));
+        assert!(!node_has_state(&node(2, None), "focused"));
+    }
+
+    #[test]
+    fn wait_for_params_map_onto_app_state_targeting() {
+        let params = WaitForParams {
+            pid: Some(4242),
+            title: Some("Sophia".to_string()),
+            role: Some("button".to_string()),
+            ..Default::default()
+        };
+        let app_state = params.app_state_params();
+        assert_eq!(app_state.pid, Some(4242));
+        assert_eq!(app_state.title.as_deref(), Some("Sophia"));
+        assert!(app_state.window_target().has_target());
+        assert_eq!(params.selector().role, Some("button"));
+    }
+
+    #[test]
+    fn ydotool_wheel_delta_follows_evdev_axis_signs() {
+        assert_eq!(ydotool_wheel_delta(ScrollDirection::Up, 3), (0, 3));
+        assert_eq!(ydotool_wheel_delta(ScrollDirection::Down, 3), (0, -3));
+        assert_eq!(ydotool_wheel_delta(ScrollDirection::Left, 3), (-3, 0));
+        assert_eq!(ydotool_wheel_delta(ScrollDirection::Right, 3), (3, 0));
     }
 
     #[test]
@@ -6939,14 +9212,29 @@ mod tests {
         backend.cache_nodes(&[button]);
 
         let target = backend
-            .resolve_click_target(&ClickParams {
-                role: Some("button".to_string()),
-                name: Some("run".to_string()),
-                ..Default::default()
-            })
+            .resolve_click_target(
+                &ClickParams {
+                    role: Some("button".to_string()),
+                    name: Some("run".to_string()),
+                    ..Default::default()
+                },
+                backend.cached_bounds_offset(),
+            )
             .unwrap();
 
-        assert!(matches!(target, ClickTarget::Coordinates(60, 40)));
+        match target {
+            ClickTarget::Element {
+                element_index,
+                action,
+                point,
+                ..
+            } => {
+                assert_eq!(element_index, 7);
+                assert_eq!(action.map(|action| action.name).as_deref(), Some("Click"));
+                assert_eq!(point, Some((60, 40)));
+            }
+            ClickTarget::Coordinates(_, _) => panic!("expected an element click target"),
+        }
     }
 
     #[test]
@@ -6973,6 +9261,19 @@ mod tests {
         let described = describe_focused_element(&element, true);
         assert!(described.contains("WARNING"));
         assert!(described.contains("not editable"));
+    }
+
+    #[test]
+    fn describe_focused_element_trusts_the_editable_state() {
+        let element = FocusedElementSummary {
+            role: "entry".to_string(),
+            name: Some("Prompt".to_string()),
+            editable: false,
+            states: vec!["focused".to_string(), "editable".to_string()],
+        };
+        let described = describe_focused_element(&element, true);
+        assert!(!described.contains("WARNING"));
+        assert!(described.contains("(editable;"));
     }
 
     #[test]

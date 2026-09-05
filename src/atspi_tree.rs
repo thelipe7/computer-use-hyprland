@@ -420,6 +420,66 @@ pub async fn perform_action(
     })
 }
 
+/// True when the error says the AT-SPI object's owner is gone from the bus:
+/// the app restarted or the window closed, so every cached object ref of that
+/// tree is dead and only a fresh get_app_state can recover.
+pub fn is_stale_object_error(error: &anyhow::Error) -> bool {
+    const STALE_MARKERS: [&str; 5] = [
+        "ServiceUnknown",
+        "UnknownObject",
+        "NameHasNoOwner",
+        "not activatable",
+        "was not provided by any .service files",
+    ];
+    error.chain().any(|cause| {
+        if let Some(zbus::Error::FDO(fdo)) = cause.downcast_ref::<zbus::Error>() {
+            if matches!(
+                **fdo,
+                zbus::fdo::Error::ServiceUnknown(_)
+                    | zbus::fdo::Error::UnknownObject(_)
+                    | zbus::fdo::Error::NameHasNoOwner(_)
+            ) {
+                return true;
+            }
+        }
+        let text = cause.to_string();
+        STALE_MARKERS.iter().any(|marker| text.contains(marker))
+    })
+}
+
+/// Current AT-SPI state labels of one element.
+pub async fn element_states(object_ref_id: &str) -> Result<Vec<String>> {
+    let conn = connect().await?;
+    let object_ref = object_ref_from_id(object_ref_id)?;
+    let proxy = open_accessible(&conn, &object_ref)
+        .await
+        .with_context(|| format!("failed to open AT-SPI object {object_ref_id}"))?;
+    let state = proxy
+        .get_state()
+        .await
+        .with_context(|| format!("failed to read AT-SPI states of {object_ref_id}"))?;
+    Ok(state_labels(state))
+}
+
+/// Ask the element to take keyboard focus through AT-SPI `Component.GrabFocus`.
+pub async fn grab_focus(object_ref_id: &str) -> Result<bool> {
+    let conn = connect().await?;
+    let object_ref = object_ref_from_id(object_ref_id)?;
+    let proxy = open_accessible(&conn, &object_ref)
+        .await
+        .with_context(|| format!("failed to open AT-SPI object {object_ref_id}"))?;
+    let component = proxy
+        .proxies()
+        .await?
+        .component()
+        .await
+        .context("element does not expose the AT-SPI Component interface")?;
+    component
+        .grab_focus()
+        .await
+        .with_context(|| format!("AT-SPI GrabFocus failed for {object_ref_id}"))
+}
+
 pub async fn set_element_value(object_ref_id: &str, value: &str) -> Result<ValueSetInvocation> {
     let conn = connect().await?;
     let object_ref = object_ref_from_id(object_ref_id)?;
@@ -1012,5 +1072,29 @@ mod tests {
         let all_failed =
             fetch_indexed_up_to(2, 2, &mut failed_attempts, |_| async { Err::<i32, _>(()) }).await;
         assert!(all_failed.all_failed());
+    }
+
+    #[test]
+    fn stale_object_errors_are_recognized() {
+        let fdo = anyhow::Error::from(zbus::Error::FDO(Box::new(
+            zbus::fdo::Error::ServiceUnknown("The name :1.99 was not provided".to_string()),
+        )))
+        .context("failed to open AT-SPI object :1.99/org/a11y/atspi/accessible/7");
+        assert!(is_stale_object_error(&fdo));
+
+        let unknown_object = anyhow::Error::from(zbus::Error::FDO(Box::new(
+            zbus::fdo::Error::UnknownObject("gone".to_string()),
+        )));
+        assert!(is_stale_object_error(&unknown_object));
+
+        let textual = anyhow::anyhow!(
+            "org.freedesktop.DBus.Error.ServiceUnknown: The name is not activatable"
+        );
+        assert!(is_stale_object_error(&textual));
+
+        let rejected = anyhow::anyhow!("AT-SPI EditableText rejected the new contents");
+        assert!(!is_stale_object_error(&rejected));
+        let no_interface = anyhow::Error::from(zbus::Error::InterfaceNotFound);
+        assert!(!is_stale_object_error(&no_interface));
     }
 }

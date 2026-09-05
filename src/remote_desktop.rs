@@ -608,6 +608,12 @@ fn env_token_contains(key: &str, needle: &str) -> bool {
 }
 
 /// Map a semantic scroll direction to `(axis, signed_steps)` for the portal.
+///
+/// The horizontal sign here is unverified: the portal spec says nothing about
+/// step polarity, and no portal-backed session was available to measure it.
+/// The ydotool path (`server::ydotool_wheel_delta`) was measured and uses the
+/// opposite horizontal sign, because positive `REL_HWHEEL` scrolls right.
+/// Flip `Left`/`Right` here only once a compositor proves the portal wrong.
 pub(crate) fn portal_scroll_axis_steps(
     direction: ScrollDirection,
     steps: i32,
