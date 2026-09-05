@@ -31,9 +31,9 @@ pub async fn focus_window_target(target: &WindowTarget) -> Result<WindowFocusRes
     let exact_window_focused = focused_window
         .as_ref()
         .is_some_and(|window| window.window_id == requested_window.window_id);
-    let app_focused = focused_window
-        .as_ref()
-        .is_some_and(|window| same_optional_string(&window.app_id, &requested_window.app_id));
+    let app_focused = focused_window.as_ref().is_some_and(|window| {
+        same_optional_string(window.app_id.as_deref(), requested_window.app_id.as_deref())
+    });
 
     Ok(WindowFocusResult {
         backend: requested_window.backend.clone(),
@@ -123,11 +123,15 @@ pub fn resolve_window_target<'a>(
             .iter()
             .filter(|window| window_matches_terminal_target(window, target))
             .filter(|window| target.pid.is_none_or(|pid| window.pid == Some(pid)))
-            .filter(|window| optional_exact_match(&window.app_id, target.app_id.as_deref()))
-            .filter(|window| optional_exact_match(&window.wm_class, target.wm_class.as_deref()))
-            .filter(|window| optional_title_match(&window.title, target.title.as_deref()))
+            .filter(|window| {
+                optional_exact_match(window.app_id.as_deref(), target.app_id.as_deref())
+            })
+            .filter(|window| {
+                optional_exact_match(window.wm_class.as_deref(), target.wm_class.as_deref())
+            })
+            .filter(|window| optional_title_match(window.title.as_deref(), target.title.as_deref()))
             .collect::<Vec<_>>();
-        return unique_window_match(matches, "terminal target");
+        return unique_window_match(&matches, "terminal target");
     }
 
     if let Some(pid) = target.pid {
@@ -135,7 +139,7 @@ pub fn resolve_window_target<'a>(
             .iter()
             .filter(|window| window.pid == Some(pid))
             .collect::<Vec<_>>();
-        return unique_window_match(matches, &format!("pid {pid}"));
+        return unique_window_match(&matches, &format!("pid {pid}"));
     }
 
     if let Some(app_id) = normalized_target(target.app_id.as_deref()) {
@@ -240,11 +244,15 @@ fn has_window_id_disambiguator(target: &WindowTarget) -> bool {
 
 fn window_id_disambiguators_match(window: &WindowInfo, target: &WindowTarget) -> bool {
     target.pid.is_none_or(|pid| window.pid == Some(pid))
-        && optional_exact_match(&window.app_id, target.app_id.as_deref())
-        && optional_exact_match(&window.wm_class, target.wm_class.as_deref())
-        && optional_title_match(&window.title, target.title.as_deref())
+        && optional_exact_match(window.app_id.as_deref(), target.app_id.as_deref())
+        && optional_exact_match(window.wm_class.as_deref(), target.wm_class.as_deref())
+        && optional_title_match(window.title.as_deref(), target.title.as_deref())
 }
 
+#[expect(
+    clippy::float_cmp,
+    reason = "the equality is the question: whether two u64 ids collapse to the same f64 after a JSON round trip"
+)]
 fn window_id_matches_json_number(actual: u64, requested: u64) -> bool {
     const JS_SAFE_INTEGER_MAX: u64 = (1_u64 << 53) - 1;
     (actual > JS_SAFE_INTEGER_MAX || requested > JS_SAFE_INTEGER_MAX)
@@ -252,10 +260,10 @@ fn window_id_matches_json_number(actual: u64, requested: u64) -> bool {
 }
 
 fn unique_window_match<'a>(
-    matches: Vec<&'a WindowInfo>,
+    matches: &[&'a WindowInfo],
     description: &str,
 ) -> Result<&'a WindowInfo> {
-    match matches.as_slice() {
+    match matches {
         [window] => Ok(*window),
         [] => bail!("No window matched {description}."),
         windows => {
@@ -349,20 +357,15 @@ fn tty_matches(actual: &str, requested: &str) -> bool {
             .is_some_and(|value| value == requested)
 }
 
-fn optional_exact_match(actual: &Option<String>, requested: Option<&str>) -> bool {
-    normalized_target(requested).is_none_or(|requested| {
-        actual
-            .as_deref()
-            .is_some_and(|value| value.eq_ignore_ascii_case(&requested))
-    })
+fn optional_exact_match(actual: Option<&str>, requested: Option<&str>) -> bool {
+    normalized_target(requested)
+        .is_none_or(|requested| actual.is_some_and(|value| value.eq_ignore_ascii_case(&requested)))
 }
 
-fn optional_title_match(actual: &Option<String>, requested: Option<&str>) -> bool {
+fn optional_title_match(actual: Option<&str>, requested: Option<&str>) -> bool {
     normalized_target(requested).is_none_or(|requested| {
         let requested = requested.to_ascii_lowercase();
-        actual
-            .as_deref()
-            .is_some_and(|value| value.to_ascii_lowercase().contains(&requested))
+        actual.is_some_and(|value| value.to_ascii_lowercase().contains(&requested))
     })
 }
 
@@ -383,8 +386,8 @@ fn normalized_target(value: Option<&str>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn same_optional_string(left: &Option<String>, right: &Option<String>) -> bool {
-    match (left.as_deref(), right.as_deref()) {
+fn same_optional_string(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
         (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
         _ => false,
     }

@@ -425,9 +425,10 @@ fn validate_probe_base(path: &Path, uid: libc::uid_t) -> Result<(), String> {
 }
 
 fn random_hex(byte_count: usize) -> io::Result<String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
     let mut bytes = vec![0_u8; byte_count];
     getrandom::fill(&mut bytes).map_err(io::Error::other)?;
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(byte_count * 2);
     for byte in bytes {
         output.push(HEX[(byte >> 4) as usize] as char);
@@ -842,8 +843,11 @@ esac
             }
             thread::sleep(Duration::from_millis(10));
         }
+        let pid = i32::try_from(pid).expect("a pid fits in an i32");
+        // SAFETY: a plain signal to a pid this test spawned. A pid that did
+        // not fit would arrive negative and signal a process group instead.
         unsafe {
-            libc::kill(pid as i32, libc::SIGKILL);
+            libc::kill(pid, libc::SIGKILL);
         }
         panic!("probe descendant {pid} was not killed")
     }

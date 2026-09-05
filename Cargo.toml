@@ -44,13 +44,15 @@ suspicious = { level = "warn", priority = -1 }
 complexity = { level = "warn", priority = -1 }
 perf = { level = "warn", priority = -1 }
 style = { level = "warn", priority = -1 }
-# Not `pedantic`, yet. Measured on clippy 0.1.98 against this tree: 230
-# warnings, and about sixty of them are numeric casts between the compositor's
-# coordinates and the image crate's, where the right answer is a decision per
-# site rather than a sweep. Turning it on is worth its own branch, with the
-# desktop available to verify the ones that change behavior. The rest of this
-# table is what could be turned on today without one.
-#
+# Enabled whole rather than cherry-picked, because cherry-picking means never
+# seeing the pedantic lints added in a later release. The two below are the
+# ones almost everybody turns back off; disagree with another by adding it
+# beside them, with the reason.
+pedantic = { level = "warn", priority = -1 }
+must_use_candidate = "allow"
+# Every float here is a scale or a coordinate ratio, and losing precision on
+# the way to one is the arithmetic, not a mistake.
+cast_precision_loss = "allow"
 # Individually chosen from `restriction` and `nursery`, which are menus rather
 # than groups and must never be enabled wholesale.
 allow_attributes_without_reason = "warn"

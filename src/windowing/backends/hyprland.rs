@@ -204,6 +204,11 @@ impl HyprlandCaptureLayout {
         {
             return None;
         }
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the block above returns None for every value outside the i32 and u32 ranges these produce"
+        )]
         Some((
             [left as i32, top as i32],
             [(right - left) as u32, (bottom - top) as u32],
@@ -219,6 +224,10 @@ impl HyprlandCaptureLayout {
         )
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "clamped to the i32 range on the line it is cast from"
+    )]
     fn map_axis(&self, value: i32, origin: i32) -> i32 {
         let scaled = ((i64::from(value) - i64::from(origin)) as f64 * self.scale).round();
         scaled.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
@@ -239,6 +248,10 @@ impl HyprlandCaptureLayout {
         [self.unmap_axis(size[0], 0), self.unmap_axis(size[1], 0)]
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "clamped to the i32 range on the line it is cast from"
+    )]
     fn unmap_axis(&self, value: i32, origin: i32) -> i32 {
         let unscaled = (f64::from(value) / self.scale).round();
         let unscaled = unscaled.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
@@ -424,7 +437,10 @@ pub async fn resize_window(window_id: u64, width: i32, height: i32) -> Result<St
         Some(layout) => layout.unmap_size([width, height]),
         None => [width, height],
     };
-    let target_size = [target[0].max(1) as u32, target[1].max(1) as u32];
+    let target_size = [
+        target[0].max(1).cast_unsigned(),
+        target[1].max(1).cast_unsigned(),
+    ];
     refuse_if_tiled(window_id, &query_client(window_id).await?, "resize")?;
     let dispatcher = run_dispatch_with_fallback(
         &lua_resize_dispatch(window_id, target),
@@ -830,6 +846,10 @@ fn parse_hyprland_address(address: &str) -> Result<u64> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unreadable_literal,
+    reason = "the long literals here are window addresses copied verbatim from hyprctl output; grouping their digits stops them matching the source they were taken from"
+)]
 mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;

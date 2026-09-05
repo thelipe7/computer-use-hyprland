@@ -6,6 +6,10 @@ pub use hyprland::HYPRLAND_BACKEND;
 
 pub const WINDOW_PERMISSION_HINT: &str = "Computer Use could not reach Hyprland. Targeted window input needs hyprctl on PATH and a running Hyprland instance whose socket this process can read.";
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "a probe answers three independent capability questions, and the readiness report copies each one out by name"
+)]
 #[derive(Debug, Clone)]
 pub struct BackendProbe {
     pub id: &'static str,

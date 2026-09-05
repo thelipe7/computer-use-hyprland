@@ -11,6 +11,14 @@ pub use target::{
 pub use types::{WindowBounds, WindowFocusResult, WindowInfo, WindowOcclusion, WindowTarget};
 
 #[cfg(test)]
+#[expect(
+    clippy::unreadable_literal,
+    reason = "the long literals here are window addresses copied verbatim from hyprctl output; grouping their digits stops them matching the source they were taken from"
+)]
+#[expect(
+    clippy::float_cmp,
+    reason = "the equality is what these tests assert: that two distinct u64 window ids collapse to the same f64 in JSON"
+)]
 mod tests {
     use super::backends::hyprland::parse_hyprland_clients;
     use super::registry::WINDOW_PERMISSION_HINT;
@@ -18,13 +26,21 @@ mod tests {
     use super::*;
     use crate::terminal::{TerminalProcess, TerminalWindowContext};
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "see the fixture pid below: the truncation is the point"
+    )]
     fn window(window_id: u64, title: &str, app_id: &str, wm_class: &str) -> WindowInfo {
         WindowInfo {
             window_id,
             title: Some(title.to_string()),
             app_id: Some(app_id.to_string()),
             wm_class: Some(wm_class.to_string()),
-            pid: Some(window_id as u32 + 1000),
+            // A fixture pid, derived from the id so two fake windows differ.
+            // Some of these ids are deliberately larger than a u32, which is
+            // what the rounding tests below are about, so this truncates on
+            // purpose.
+            pid: Some((window_id as u32).wrapping_add(1000)),
             bounds: Some(WindowBounds {
                 x: None,
                 y: None,

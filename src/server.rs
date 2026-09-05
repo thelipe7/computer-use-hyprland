@@ -34,6 +34,7 @@ use std::{
     collections::BTreeMap,
     env,
     ffi::OsString,
+    fmt::Write as _,
     os::unix::net::UnixDatagram,
     path::{Path, PathBuf},
     process::{Command, Output},
@@ -109,6 +110,10 @@ fn sanitize_unsigned_integer_formats(value: &mut serde_json::Value) {
 }
 
 impl ComputerUseLinux {
+    #[expect(
+        clippy::unused_self,
+        reason = "the tool_handler macro expands to `self.mcp_tool_router()`, so it has to be a method"
+    )]
     fn mcp_tool_router(&self) -> rmcp::handler::server::router::tool::ToolRouter<Self> {
         let mut router = Self::tool_router();
         if !shell_execution_enabled() {
@@ -320,7 +325,7 @@ impl ComputerUseLinux {
                 self.cache_desktop_size(raw.width, raw.height);
                 if let Some(window) = window_context.as_ref() {
                     ensure_readonly_screenshot_target_is_visible(window)?;
-                    let crop = self.window_crop_rect_for_capture(window, &raw).await?;
+                    let crop = Self::window_crop_rect_for_capture(window, &raw)?;
                     prepare_app_state_screenshot(
                         raw,
                         Some(crop),
@@ -408,17 +413,19 @@ impl ComputerUseLinux {
             )
         };
         if let Some(window) = &window_context {
-            message.push_str(&format!(
+            let _ = write!(
+                message,
                 " Window target resolved to window_id {}.",
                 window.window_id
-            ));
+            );
         } else if let Some(error) = &window_error {
-            message.push_str(&format!(" Window target resolution failed: {error}"));
+            let _ = write!(message, " Window target resolution failed: {error}");
         } else if let Some(window) = &bounds_window {
-            message.push_str(&format!(
+            let _ = write!(
+                message,
                 " No window target was given; the tree's window-relative bounds were tied to window_id {} through the app's own pid.",
                 window.window_id
-            ));
+            );
         }
 
         // Full diagnostics are huge (portal/process dumps); emit them only on
@@ -530,7 +537,7 @@ impl ComputerUseLinux {
             let probe = self
                 .probe_wait_predicates(&params, &app_state_params, &selector)
                 .await;
-            let elapsed_ms = started.elapsed().as_millis() as u64;
+            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             if probe.satisfied {
                 let element_note = probe
                     .element
@@ -568,7 +575,7 @@ impl ComputerUseLinux {
             }
             sleep(WAIT_FOR_POLL_INTERVAL.min(deadline - now)).await;
         };
-        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let reason = last
             .error
             .take()
@@ -652,10 +659,8 @@ impl ComputerUseLinux {
 
         let (capture, window_crop) = match crop_window {
             Some(window) => {
-                let (x, y, width, height) = self
-                    .window_crop_rect_for_capture(window, &raw_capture)
-                    .await
-                    .map_err(|error| {
+                let (x, y, width, height) =
+                    Self::window_crop_rect_for_capture(window, &raw_capture).map_err(|error| {
                         ErrorData::internal_error(
                             format!("targeted screenshot crop failed: {error:#}"),
                             None,
@@ -772,7 +777,10 @@ impl ComputerUseLinux {
         };
         self.cache_desktop_size(cap.width, cap.height);
         match tokio::task::spawn_blocking(move || {
-            crate::abs_pointer::AbsPointer::create(cap.width as i32, cap.height as i32)
+            crate::abs_pointer::AbsPointer::create(
+                i32::try_from(cap.width).unwrap_or(i32::MAX),
+                i32::try_from(cap.height).unwrap_or(i32::MAX),
+            )
         })
         .await
         {
@@ -878,7 +886,7 @@ impl ComputerUseLinux {
                         received,
                     ));
                 };
-                let coordinate_map = match self.focused_window_coordinate_map(focus).await {
+                let coordinate_map = match self.focused_window_coordinate_map(focus) {
                     Ok(mapping) => mapping,
                     Err(message) => {
                         return Json(action_failure("click", message, received));
@@ -1234,6 +1242,10 @@ impl ComputerUseLinux {
             return Json(action_failure("scroll", message, received));
         }
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a float-to-int cast saturates, and max(1) below makes the saturated value harmless"
+        )]
         let units = ((params.pages.unwrap_or(1.0).abs().max(0.1) * 5.0).round() as i32).max(1);
         // Raise/focus the target window first (parity with click) so wheel
         // events land on the intended app.
@@ -1262,7 +1274,7 @@ impl ComputerUseLinux {
                         received,
                     ));
                 };
-                let coordinate_map = match self.focused_window_coordinate_map(focus).await {
+                let coordinate_map = match self.focused_window_coordinate_map(focus) {
                     Ok(mapping) => mapping,
                     Err(message) => {
                         return Json(action_failure("scroll", message, received));
@@ -1286,7 +1298,7 @@ impl ComputerUseLinux {
                         received,
                     ));
                 };
-                let coordinate_map = match self.focused_window_coordinate_map(focus).await {
+                let coordinate_map = match self.focused_window_coordinate_map(focus) {
                     Ok(mapping) => mapping,
                     Err(message) => {
                         return Json(action_failure("scroll", message, received));
@@ -1478,10 +1490,7 @@ impl ComputerUseLinux {
                 let focus = focus.as_ref().ok_or_else(|| {
                     "Relative drag coordinates require verified target-window focus.".to_string()
                 })?;
-                let (x, y, _, _) = self
-                    .focused_window_coordinate_map(focus)
-                    .await?
-                    .capture_rect;
+                let (x, y, _, _) = self.focused_window_coordinate_map(focus)?.capture_rect;
                 origin = (x, y);
             }
         }
@@ -1752,7 +1761,7 @@ impl ComputerUseLinux {
         // X11: xdotool type resolves keysyms against the live XKB layout.
         // ydotool's raw scancodes get re-mapped by X11 and mangle symbols and
         // digits (`_` → `%`, `1` → `+`) even on a plain US layout (issue #58).
-        if self.should_prefer_wtype_keyboard() {
+        if Self::should_prefer_wtype_keyboard() {
             let text = params.text.clone();
             let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
                 run_wtype_type_text_or_fallback(Path::new("wtype"), &text, || {
@@ -1864,6 +1873,10 @@ impl ComputerUseLinux {
     }
 }
 
+#[expect(
+    clippy::unused_async_trait_impl,
+    reason = "the ServerHandler impl is generated by the tool_handler macro, which writes the trait's async signatures"
+)]
 #[tool_handler(
     router = self.mcp_tool_router(),
     name = "computer-use-hyprland",
@@ -1953,8 +1966,10 @@ fn inherited_shell_environment(
 fn shell_command_sha256(command: &str) -> String {
     Sha256::digest(command.as_bytes())
         .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+        .fold(String::with_capacity(64), |mut digest, byte| {
+            let _ = write!(digest, "{byte:02x}");
+            digest
+        })
 }
 
 fn bounded_shell_stream(bytes: &[u8]) -> (String, bool) {
@@ -1987,6 +2002,10 @@ fn shell_error_output(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one linear procedure: validate, spawn, bound, audit, assemble. Splitting it would hand each half six arguments"
+)]
 async fn execute_shell(params: RunShellParams) -> RunShellOutput {
     let command_sha256 = shell_command_sha256(&params.command);
     let timeout_seconds = params.timeout_seconds.unwrap_or(SHELL_DEFAULT_TIMEOUT_SECS);
@@ -2473,6 +2492,10 @@ struct ScreenshotRegion {
 /// capture's pixels) and the same rectangle in desktop coordinates for the
 /// caption. `window_crop` is the desktop rectangle the capture was already
 /// cropped to, when it was.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "the discarded error is a TryFromIntError, whose message names no dimension; each arm names the one that failed"
+)]
 fn region_crop_rect(
     region: &ScreenshotRegion,
     relative: bool,
@@ -2508,15 +2531,16 @@ fn region_crop_rect(
             region.x, region.y, region.width, region.height, capture_width, capture_height
         ));
     }
+    let out_of_range = |what: &str| format!("region {what} does not fit the captured image.");
     let capture_rect = (
-        left as i32,
-        top as i32,
-        (right - left) as u32,
-        (bottom - top) as u32,
+        i32::try_from(left).map_err(|_| out_of_range("x"))?,
+        i32::try_from(top).map_err(|_| out_of_range("y"))?,
+        u32::try_from(right - left).map_err(|_| out_of_range("width"))?,
+        u32::try_from(bottom - top).map_err(|_| out_of_range("height"))?,
     );
     let desktop_rect = (
-        (left + capture_left) as i32,
-        (top + capture_top) as i32,
+        i32::try_from(left + capture_left).map_err(|_| out_of_range("x"))?,
+        i32::try_from(top + capture_top).map_err(|_| out_of_range("y"))?,
         capture_rect.2,
         capture_rect.3,
     );
@@ -2918,17 +2942,17 @@ struct ActionOutput {
 }
 
 impl ComputerUseLinux {
-    fn is_wayland_session(&self) -> bool {
+    fn is_wayland_session() -> bool {
         crate::diagnostics::hydrate_session_bus_env();
         let session_type = env::var("XDG_SESSION_TYPE").ok();
         let wayland_display = env::var("WAYLAND_DISPLAY").ok();
         session_is_wayland(session_type.as_deref(), wayland_display.as_deref())
     }
 
-    fn should_prefer_wtype_keyboard(&self) -> bool {
+    fn should_prefer_wtype_keyboard() -> bool {
         prefer_wtype_keyboard(
             env_flag_enabled("COMPUTER_USE_HYPRLAND_FORCE_YDOTOOL_KEYBOARD"),
-            self.is_wayland_session(),
+            Self::is_wayland_session(),
             crate::diagnostics::wtype_compatible_wayland_desktop(
                 env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
             ),
@@ -2988,29 +3012,25 @@ impl ComputerUseLinux {
         Ok(window)
     }
 
-    async fn window_crop_rect_for_capture(
-        &self,
+    fn window_crop_rect_for_capture(
         window: &WindowInfo,
         raw: &RawScreenshotCapture,
     ) -> Result<(i32, i32, u32, u32)> {
-        self.window_crop_rect_for_dimensions(window, raw.width, raw.height)
-            .await
+        Self::window_crop_rect_for_dimensions(window, raw.width, raw.height)
     }
 
-    async fn window_crop_rect_for_dimensions(
-        &self,
+    fn window_crop_rect_for_dimensions(
         window: &WindowInfo,
         capture_width: u32,
         capture_height: u32,
     ) -> Result<(i32, i32, u32, u32)> {
-        Ok(self
-            .window_coordinate_map_for_dimensions(window, capture_width, capture_height)
-            .await?
-            .capture_rect)
+        Ok(
+            Self::window_coordinate_map_for_dimensions(window, capture_width, capture_height)?
+                .capture_rect,
+        )
     }
 
-    async fn window_coordinate_map_for_dimensions(
-        &self,
+    fn window_coordinate_map_for_dimensions(
         window: &WindowInfo,
         capture_width: u32,
         capture_height: u32,
@@ -3030,7 +3050,7 @@ impl ComputerUseLinux {
         })
     }
 
-    async fn focused_window_coordinate_map(
+    fn focused_window_coordinate_map(
         &self,
         focus: &WindowFocusResult,
     ) -> std::result::Result<WindowCoordinateMap, String> {
@@ -3165,6 +3185,10 @@ impl ComputerUseLinux {
     /// One evaluation of every `wait_for` predicate. Stops at the first one
     /// that does not hold and says why; a satisfied probe carries the matched
     /// element and has already cached the tree it came from.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one predicate after another, each stopping the probe; the shared WaitProbe is what makes them one function"
+    )]
     async fn probe_wait_predicates(
         &self,
         params: &WaitForParams,
@@ -3310,13 +3334,18 @@ impl ComputerUseLinux {
     async fn capture_space_rect(&self) -> Option<(i32, i32, i32, i32)> {
         let cached = self.desktop_size.lock().ok().and_then(|guard| *guard);
         if let Some((w, h)) = cached {
-            return Some((0, 0, w as i32, h as i32));
+            return Some((0, 0, i32::try_from(w).ok()?, i32::try_from(h).ok()?));
         }
         // One-time prime: a full-frame capture reveals the desktop size when
         // no prior capture is available.
         let raw = capture_screenshot_raw().await.ok()?;
         self.cache_desktop_size(raw.width, raw.height);
-        (raw.width > 0 && raw.height > 0).then_some((0, 0, raw.width as i32, raw.height as i32))
+        (raw.width > 0 && raw.height > 0).then_some((
+            0,
+            0,
+            i32::try_from(raw.width).ok()?,
+            i32::try_from(raw.height).ok()?,
+        ))
     }
 
     /// Warn when a targeted window pokes outside every monitor: clicks and
@@ -3709,7 +3738,6 @@ impl ComputerUseLinux {
     /// window-origin offset applied when the tree reported window-relative
     /// bounds.
     fn desktop_center_for_node(
-        &self,
         node: &AccessibilityNode,
         offset: Option<(i32, i32)>,
     ) -> Option<(i32, i32)> {
@@ -3756,7 +3784,7 @@ impl ComputerUseLinux {
             ElementResolvePurpose::Click,
         )?;
 
-        let point = self.desktop_center_for_node(&node, offset);
+        let point = Self::desktop_center_for_node(&node, offset);
         let plain_click = is_plain_left_click(params.button.as_deref(), params.click_count);
 
         // A plain left click is what the element's own `click` action does,
@@ -3805,7 +3833,7 @@ impl ComputerUseLinux {
     ) -> Option<(i32, i32)> {
         let cached = self.last_nodes.lock().ok()?;
         let node = cached.iter().find(|node| node.index == element_index)?;
-        self.desktop_center_for_node(node, offset)
+        Self::desktop_center_for_node(node, offset)
     }
 
     fn resolve_object_ref(
@@ -4425,7 +4453,12 @@ fn compact_accessibility_tree(nodes: Vec<AccessibilityNode>) -> Vec<Accessibilit
         }
 
         let mut compacted_node = node.clone();
-        compacted_node.index = compacted.len() as u32;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the tree it compacts is capped at HARD_SNAPSHOT_MAX_NODES, which is 2,000"
+        )]
+        let index = compacted.len() as u32;
+        compacted_node.index = index;
         compacted_node.parent_index = nearest_kept_parent(&keep, &nodes, old_index);
         old_to_new[old_index] = Some(compacted_node.index);
         compacted.push(compacted_node);
@@ -4693,7 +4726,7 @@ fn apply_window_relative_click_coordinates(
     if relative_x < 0 || relative_y < 0 {
         return Err("Relative click coordinates must be inside target-window bounds.".to_string());
     }
-    if relative_x as u32 >= width || relative_y as u32 >= height {
+    if i64::from(relative_x) >= i64::from(width) || i64::from(relative_y) >= i64::from(height) {
         return Err("Relative click coordinates must be inside target-window bounds.".to_string());
     }
     let x = origin_x
@@ -4721,8 +4754,8 @@ fn apply_window_center_scroll_point(
                 .to_string(),
         );
     }
-    params.x = Some(origin_x.saturating_add((width / 2) as i32));
-    params.y = Some(origin_y.saturating_add((height / 2) as i32));
+    params.x = Some(origin_x.saturating_add(i32::try_from(width / 2).unwrap_or(i32::MAX)));
+    params.y = Some(origin_y.saturating_add(i32::try_from(height / 2).unwrap_or(i32::MAX)));
     Ok(())
 }
 
@@ -4740,7 +4773,10 @@ fn apply_window_relative_scroll_coordinates(
             "Relative scroll coordinates require non-empty target-window bounds.".to_string(),
         );
     }
-    if relative_x < 0 || relative_y < 0 || relative_x as u32 >= width || relative_y as u32 >= height
+    if relative_x < 0
+        || relative_y < 0
+        || i64::from(relative_x) >= i64::from(width)
+        || i64::from(relative_y) >= i64::from(height)
     {
         return Err("Relative scroll coordinates must be inside target-window bounds.".to_string());
     }
@@ -4762,8 +4798,8 @@ fn crop_png(
     let img = image::load_from_memory_with_format(raw, image::ImageFormat::Png)
         .map_err(|e| format!("decode png: {e}"))?;
     let (iw, ih) = (img.width(), img.height());
-    let x = x.max(0) as u32;
-    let y = y.max(0) as u32;
+    let x = x.max(0).cast_unsigned();
+    let y = y.max(0).cast_unsigned();
     if x >= iw || y >= ih {
         return Err("crop origin outside image".into());
     }
@@ -5058,8 +5094,7 @@ async fn run_ydotool_drag(
             outputs.push(output);
             Ok(outputs)
         }
-        (Some(error), Ok(_)) => Err(error),
-        (None, Err(error)) => Err(error),
+        (Some(error), Ok(_)) | (None, Err(error)) => Err(error),
         (Some(error), Err(release_error)) => Err(format!(
             "{error}; ydotool button release also failed: {release_error}"
         )),
@@ -5103,7 +5138,7 @@ async fn run_ydotool(args: &[String]) -> std::result::Result<Output, String> {
             Ok(output)
         }
     } else {
-        Err(ydotool_output_error(output))
+        Err(ydotool_output_error(&output))
     }
 }
 
@@ -5129,7 +5164,7 @@ async fn run_ydotool_type_text(text: &str) -> std::result::Result<Output, String
             Ok(output)
         }
     } else {
-        Err(ydotool_output_error(output))
+        Err(ydotool_output_error(&output))
     }
 }
 
@@ -5138,7 +5173,7 @@ fn ydotool_type_timeout(text: &str) -> Duration {
     Duration::from_secs(INPUT_COMMAND_TIMEOUT.as_secs().saturating_add(text_seconds))
 }
 
-fn ydotool_output_error(output: Output) -> String {
+fn ydotool_output_error(output: &Output) -> String {
     command_output_error("ydotool", output)
 }
 
@@ -5188,7 +5223,7 @@ where
     .await
     .map_err(|error| format!("{error:#}"))?;
     if !output.status.success() {
-        return Err(command_output_error("wtype", output));
+        return Err(command_output_error("wtype", &output));
     }
     Ok(KeyboardCommandResult {
         output,
@@ -5200,6 +5235,10 @@ fn wtype_available() -> bool {
     which_in_path("wtype")
 }
 
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "four measured facts, each genuinely a yes or a no; a struct would name them twice and be built at one call site"
+)]
 fn prefer_wtype_keyboard(
     force_ydotool: bool,
     is_wayland: bool,
@@ -5219,7 +5258,7 @@ fn which_in_path(binary: &str) -> bool {
     })
 }
 
-fn command_output_error(command: &str, output: Output) -> String {
+fn command_output_error(command: &str, output: &Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let detail = if stderr.is_empty() { stdout } else { stderr };
@@ -5829,7 +5868,7 @@ mod tests {
             Some("CU ATSPI GTK Test"),
             Some("window:46"),
             Some("cu_atspi_gtk_test.py"),
-            Some(2914326),
+            Some(2_914_326),
         );
 
         let candidates = accessibility_filter_candidates(Some(&window));
@@ -5849,7 +5888,7 @@ mod tests {
             AccessibleAppSummary {
                 object_ref: ":1.31/org/a11y/atspi/accessible/root".to_string(),
                 name: Some("electron".to_string()),
-                pid: Some(2774076),
+                pid: Some(2_774_076),
                 role: "application".to_string(),
                 child_count: 1,
                 bounds: None,
@@ -5857,7 +5896,7 @@ mod tests {
             AccessibleAppSummary {
                 object_ref: ":1.64/org/a11y/atspi/accessible/root".to_string(),
                 name: Some("cu_atspi_gtk_test.py".to_string()),
-                pid: Some(2914326),
+                pid: Some(2_914_326),
                 role: "application".to_string(),
                 child_count: 1,
                 bounds: None,
@@ -5866,7 +5905,7 @@ mod tests {
 
         let object_ref = select_accessibility_object_ref(
             &apps,
-            2914326,
+            2_914_326,
             &[
                 "CU ATSPI GTK Test".to_string(),
                 "cu_atspi_gtk_test.py".to_string(),

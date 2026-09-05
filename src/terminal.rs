@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
-    path::PathBuf,
+    path::Path,
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -258,6 +258,10 @@ fn read_process_table() -> Vec<ProcessInfo> {
         .collect()
 }
 
+#[expect(
+    clippy::similar_names,
+    reason = "pid and ppid are what /proc calls them"
+)]
 fn read_process_info(pid: u32) -> Option<ProcessInfo> {
     let (ppid, start_ticks) = parse_stat(pid)?;
     let command_name = fs::read_to_string(format!("/proc/{pid}/comm"))
@@ -268,7 +272,7 @@ fn read_process_info(pid: u32) -> Option<ProcessInfo> {
     let command_line = read_command_line(pid).unwrap_or_else(|| command_name.clone());
     let cwd = fs::read_link(format!("/proc/{pid}/cwd"))
         .ok()
-        .map(path_to_string);
+        .map(|path| path_to_string(&path));
     let tty_paths = read_tty_paths(pid);
 
     Some(ProcessInfo {
@@ -316,7 +320,7 @@ fn read_tty_paths(pid: u32) -> Vec<String> {
         .flatten()
         .filter_map(|entry| fs::read_link(entry.path()).ok())
         .filter_map(|path| {
-            let value = path_to_string(path);
+            let value = path_to_string(&path);
             value.starts_with("/dev/pts/").then_some(value)
         })
         .collect::<Vec<_>>();
@@ -325,7 +329,7 @@ fn read_tty_paths(pid: u32) -> Vec<String> {
     paths
 }
 
-fn path_to_string(path: PathBuf) -> String {
+fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
@@ -356,6 +360,10 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::similar_names,
+        reason = "pid and ppid are what /proc calls them"
+    )]
     fn process(
         pid: u32,
         ppid: u32,

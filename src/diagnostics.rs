@@ -115,6 +115,10 @@ pub struct InputReport {
     pub wtype: Check,
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "a readiness report is a list of yes-or-no answers, and each is a field name in the JSON a caller reads"
+)]
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ReadinessReport {
     pub can_register_mcp_tools: bool,

@@ -60,7 +60,7 @@ pub struct Bounds {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct AccessibilityAction {
-    pub index: i32,
+    pub index: usize,
     pub name: String,
     pub description: String,
     pub keybinding: String,
@@ -98,7 +98,7 @@ pub struct AccessibilityTextSelection {
 
 #[derive(Debug, Clone)]
 pub struct ActionInvocation {
-    pub action_index: i32,
+    pub action_index: usize,
     pub action_name: Option<String>,
     pub ok: bool,
 }
@@ -324,6 +324,10 @@ async fn snapshot_tree_inner(
         let Ok(proxy) = open_accessible(&conn, &object_ref).await else {
             continue;
         };
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the traversal stops at HARD_SNAPSHOT_MAX_NODES, which is 2,000"
+        )]
         let index = nodes.len() as u32;
         let remaining = traversal.remaining_capacity();
         let child_refs = if depth < max_depth && remaining > 0 {
@@ -453,11 +457,11 @@ pub async fn perform_action(
         .context("element does not expose the AT-SPI Action interface")?;
     let actions = action.get_actions().await.unwrap_or_default();
     let action_index = select_action_index(&actions, requested_action)?;
-    let action_name = actions
-        .get(action_index as usize)
-        .map(|action| action.name.clone());
+    let action_name = actions.get(action_index).map(|action| action.name.clone());
+    let wire_index = i32::try_from(action_index)
+        .context("AT-SPI action index does not fit the interface's i32")?;
     let ok = action
-        .do_action(action_index)
+        .do_action(wire_index)
         .await
         .with_context(|| format!("failed to invoke AT-SPI action {action_index}"))?;
 
@@ -831,7 +835,7 @@ async fn actions_from_proxies(
         .into_iter()
         .enumerate()
         .map(|(index, action)| AccessibilityAction {
-            index: index as i32,
+            index,
             name: action.name,
             description: action.description,
             keybinding: action.keybinding,
@@ -936,7 +940,7 @@ fn state_labels(state_set: StateSet) -> Vec<String> {
     state_set.iter().map(|state| state.to_string()).collect()
 }
 
-fn select_action_index(actions: &[atspi::Action], requested_action: Option<&str>) -> Result<i32> {
+fn select_action_index(actions: &[atspi::Action], requested_action: Option<&str>) -> Result<usize> {
     if actions.is_empty() {
         return Err(anyhow!("element exposes no AT-SPI actions"));
     }
@@ -950,13 +954,13 @@ fn select_action_index(actions: &[atspi::Action], requested_action: Option<&str>
             action.name.to_ascii_lowercase() == requested_action
                 || action.description.to_ascii_lowercase() == requested_action
         }) {
-            return Ok(index as i32);
+            return Ok(index);
         }
 
         if let Ok(index) = requested_action.parse::<usize>()
             && index < actions.len()
         {
-            return Ok(index as i32);
+            return Ok(index);
         }
 
         return Err(anyhow!(
@@ -969,7 +973,7 @@ fn select_action_index(actions: &[atspi::Action], requested_action: Option<&str>
         ));
     }
 
-    Ok(i32::from(actions.len() > 1))
+    Ok(usize::from(actions.len() > 1))
 }
 
 fn optional_string(value: Option<String>) -> Option<String> {

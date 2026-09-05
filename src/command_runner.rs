@@ -366,6 +366,10 @@ fn terminate_blocking_process(child: &mut std::process::Child, pgid: i32) {
     let _ = child.kill();
     let deadline = StdInstant::now() + REAP_TIMEOUT;
     loop {
+        #[expect(
+            clippy::match_same_arms,
+            reason = "the guarded arm sits between them, so the two returns cannot be merged: one is the child having gone, the other is the deadline"
+        )]
         match child.try_wait() {
             Ok(Some(_)) | Err(_) => return,
             Ok(None) if StdInstant::now() < deadline => thread::sleep(BLOCKING_POLL_INTERVAL),
@@ -671,8 +675,11 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        let pid = i32::try_from(pid).expect("a pid fits in an i32");
+        // SAFETY: a plain signal to a pid this test spawned. A pid that did
+        // not fit would arrive negative and signal a process group instead.
         unsafe {
-            libc::kill(pid as i32, libc::SIGKILL);
+            libc::kill(pid, libc::SIGKILL);
         }
         panic!("process {pid} was not killed and reaped")
     }

@@ -307,6 +307,11 @@ fn read_png_as_capture(path: &Path, source: &str) -> Result<RawScreenshotCapture
     })
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "scale is positive and at most 1.0, so the product is within the dimension it came from, and the clamp bounds it again"
+)]
 fn target_dimensions(
     width: u32,
     height: u32,
@@ -391,6 +396,11 @@ fn encode_image(
     Ok(out)
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "shrink is clamped to [0.1, 0.95], so the product is smaller than the dimension it came from"
+)]
 fn next_dimensions_for_byte_cap(
     width: u32,
     height: u32,
@@ -496,6 +506,10 @@ mod tests {
         encode_test_png(img)
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the remainder of 256 is a byte by construction"
+    )]
     fn noisy_png(width: u32, height: u32) -> Vec<u8> {
         let mut img = image::RgbaImage::new(width, height);
         for (x, y, pixel) in img.enumerate_pixels_mut() {
@@ -550,9 +564,11 @@ mod tests {
 
     #[test]
     fn default_payload_downscales_long_edge() {
-        let capture =
-            prepare_screenshot_payload(raw_capture(solid_png(4000, 1000)), Default::default())
-                .unwrap();
+        let capture = prepare_screenshot_payload(
+            raw_capture(solid_png(4000, 1000)),
+            ScreenshotPayloadOptions::default(),
+        )
+        .unwrap();
 
         assert_eq!((capture.width, capture.height), (1920, 480));
         assert_eq!(
