@@ -79,7 +79,6 @@ resize, then `floating: false` to put the layout back.
 |---|---|
 | `COMPUTER_USE_HYPRLAND_ENABLE_SHELL=1` | Registers `run_shell`. Off by default; the command is not sandboxed. |
 | `COMPUTER_USE_HYPRLAND_ALLOWED_APPS` | Comma-separated `app_id`/`wm_class`/`title` patterns. Input tools refuse windows matching none of them. |
-| `COMPUTER_USE_HYPRLAND_SCREENSHOT_BACKEND` | Pins the screenshot backend instead of probing. |
 | `COMPUTER_USE_HYPRLAND_FORCE_YDOTOOL_KEYBOARD=1` | Skips `wtype` and sends literal text through ydotool. |
 | `COMPUTER_USE_HYPRLAND_DISABLE_ABS_POINTER=1` | Skips the uinput absolute pointer, leaving ydotool for the pointer too. |
 
