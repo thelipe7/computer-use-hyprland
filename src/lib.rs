@@ -3,19 +3,14 @@ mod abs_pointer;
 mod atspi_tree_impl;
 mod cli;
 mod command_runner;
-mod cosmic_helper;
 #[path = "diagnostics.rs"]
 mod diagnostics_impl;
-mod gnome_extension;
-mod identity;
-mod remote_desktop;
 #[path = "screenshot.rs"]
 mod screenshot_impl;
 mod server;
 mod session_lock;
 mod terminal;
 mod windowing;
-mod windows;
 mod ydotool;
 
 pub mod atspi_tree {

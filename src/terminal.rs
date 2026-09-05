@@ -1,4 +1,4 @@
-use crate::windows::WindowInfo;
+use crate::windowing::WindowInfo;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -332,7 +332,7 @@ fn path_to_string(path: PathBuf) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::windows::{WindowBounds, GNOME_SHELL_EXTENSION_BACKEND};
+    use crate::windowing::{WindowBounds, HYPRLAND_BACKEND};
 
     fn terminal_window(window_id: u64, pid: u32) -> WindowInfo {
         WindowInfo {
@@ -351,7 +351,7 @@ mod tests {
             focused: false,
             hidden: false,
             client_type: Some("wayland".to_string()),
-            backend: GNOME_SHELL_EXTENSION_BACKEND.to_string(),
+            backend: HYPRLAND_BACKEND.to_string(),
             terminal: None,
         }
     }

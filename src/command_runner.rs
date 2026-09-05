@@ -42,10 +42,6 @@ pub(crate) async fn output_with_stdin(
     output_with_input(command, action, timeout, Some(input)).await
 }
 
-pub(crate) fn output_blocking(command: &mut StdCommand, action: &str) -> Result<Output> {
-    output_blocking_with_timeout(command, action, COMMAND_TIMEOUT)
-}
-
 pub(crate) fn output_blocking_with_timeout(
     command: &mut StdCommand,
     action: &str,
@@ -145,10 +141,6 @@ async fn output_with_input(
         .spawn()
         .with_context(|| format!("failed to {action}"))?;
     supervise_child(child, action, timeout, input).await
-}
-
-pub(crate) async fn output_child(child: Child, action: &str, timeout: Duration) -> Result<Output> {
-    supervise_child(child, action, timeout, None).await
 }
 
 async fn supervise_child(
@@ -619,7 +611,12 @@ mod tests {
         ]);
         let started = Instant::now();
 
-        let error = output_blocking(&mut command, "run blocking process tree").unwrap_err();
+        let error = output_blocking_with_timeout(
+            &mut command,
+            "run blocking process tree",
+            Duration::from_millis(2000),
+        )
+        .unwrap_err();
 
         assert!(error
             .to_string()

@@ -59,10 +59,6 @@ pub(crate) fn ensure_backend_can_focus_target(
 }
 
 async fn current_focused_window() -> Result<Option<WindowInfo>> {
-    if let Some(window) = registry::focused_window_override().await {
-        return Ok(Some(window));
-    }
-
     Ok(list_windows()
         .await?
         .into_iter()

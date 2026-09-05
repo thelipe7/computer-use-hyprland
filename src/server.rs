@@ -5,24 +5,19 @@ use crate::atspi_tree::{
     Bounds, FocusedElementSummary, ValueSetInvocation,
 };
 use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
-use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetupReport};
-use crate::remote_desktop::{
-    click as portal_click, drag as portal_drag, keysyms_for_text, press_keycode_chord,
-    scroll as portal_scroll, start_portal_keyboard_session, start_portal_pointer_session,
-    type_text_with_keysyms, PointerButton, PortalKeyboardSession, PortalPointerSession,
-    ScrollDirection,
-};
 use crate::screenshot::{
     capture_screenshot_raw, prepare_screenshot_payload, RawScreenshotCapture, ScreenshotCapture,
     ScreenshotOutputFormat, ScreenshotPayloadOptions,
 };
 use crate::windowing::registry;
-use crate::windows::{
+use crate::windowing::{
     focus_window_target, focused_window, list_windows, resolve_window_target,
     window_permission_hint, WindowFocusResult, WindowInfo, WindowOcclusion, WindowTarget,
-    GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND, KWIN_BACKEND,
 };
 use crate::ydotool;
+
+/// What `backend` reports when no window backend could answer at all.
+const UNKNOWN_BACKEND: &str = "unavailable";
 use anyhow::Result;
 use rmcp::{
     handler::server::wrapper::{Json, Parameters},
@@ -39,7 +34,7 @@ use std::{
     future::Future,
     os::unix::net::UnixDatagram,
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Command, Output},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -47,7 +42,6 @@ use tokio::{
     process::Command as TokioCommand,
     time::{sleep, timeout},
 };
-use zbus::{Connection as ZbusConnection, Proxy as ZbusProxy};
 
 const INPUT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const WAIT_FOR_DEFAULT_TIMEOUT_MS: u64 = 5_000;
@@ -60,10 +54,6 @@ const KEY_SEQUENCE_DELAY: Duration = Duration::from_millis(60);
 const POST_ACTION_SETTLE: Duration = Duration::from_millis(120);
 const ALLOWED_APPS_ENV: &str = "COMPUTER_USE_LINUX_ALLOWED_APPS";
 const YDOTOOL_TYPE_CHARS_PER_SECOND: u64 = 20;
-const KDE_CLIPBOARD_DBUS_TIMEOUT: Duration = Duration::from_secs(3);
-const KDE_KLIPPER_SERVICE: &str = "org.kde.klipper";
-const KDE_KLIPPER_PATH: &str = "/klipper";
-const KDE_KLIPPER_INTERFACE: &str = "org.kde.klipper.klipper";
 const SHELL_ENABLE_ENV: &str = "COMPUTER_USE_LINUX_ENABLE_SHELL";
 const SHELL_DEFAULT_TIMEOUT_SECS: u64 = 30;
 const SHELL_MAX_TIMEOUT_SECS: u64 = 120;
@@ -82,15 +72,11 @@ pub struct ComputerUseLinux {
     /// How the cached nodes' bounds map onto desktop coordinates. See
     /// [`bounds_are_window_relative`].
     node_bounds: Arc<Mutex<CachedBounds>>,
-    portal_pointer_session: Arc<Mutex<Option<PortalPointerSession>>>,
-    portal_keyboard_session: Arc<Mutex<Option<PortalKeyboardSession>>>,
-    /// Lazily-created uinput absolute pointer (preferred coordinate backend).
+    /// Lazily-created uinput absolute pointer, the only pointer backend.
     abs_pointer: Arc<Mutex<Option<crate::abs_pointer::AbsPointer>>>,
-    portal_session_init_lock: Arc<tokio::sync::Mutex<()>>,
     input_operation_lock: Arc<tokio::sync::Mutex<()>>,
-    kde_clipboard_lock: Arc<tokio::sync::Mutex<()>>,
-    /// Cached physical desktop size from the most recent full-frame capture;
-    /// used for off-screen warnings and portal logical-coordinate mapping.
+    /// Cached physical desktop size from the most recent full-frame capture,
+    /// used for off-screen warnings.
     desktop_size: Arc<Mutex<Option<(u32, u32)>>>,
 }
 
@@ -180,20 +166,6 @@ impl ComputerUseLinux {
     }
 
     #[tool(
-        name = "setup_window_targeting",
-        description = "Install and enable the optional GNOME Shell extension used for exact window list/focus targeting when GNOME blocks native introspection.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn setup_window_targeting(&self) -> Json<WindowTargetingSetupReport> {
-        Json(setup_window_targeting_report().await)
-    }
-
-    #[tool(
         name = "list_apps",
         description = "List running Linux desktop app candidates visible to the Computer Use backend.",
         annotations(
@@ -258,7 +230,7 @@ impl ComputerUseLinux {
             Err(error) => {
                 let error = format!("{error:#}");
                 Json(FocusedWindowOutput {
-                    backend: GNOME_SHELL_INTROSPECT_BACKEND.to_string(),
+                    backend: UNKNOWN_BACKEND.to_string(),
                     focused_window: None,
                     permissions_hint: window_permission_hint(&error),
                     error: Some(error),
@@ -302,7 +274,7 @@ impl ComputerUseLinux {
                 Json(ActivateWindowOutput {
                     ok: false,
                     implemented: true,
-                    backend: GNOME_SHELL_INTROSPECT_BACKEND.to_string(),
+                    backend: UNKNOWN_BACKEND.to_string(),
                     focus: None,
                     permissions_hint: window_permission_hint(&error),
                     error: Some(error),
@@ -885,7 +857,6 @@ impl ComputerUseLinux {
             });
         }
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
-        let mut portal_target_point = None;
         // Raise the target window first (if specified) so the click lands on the
         // intended app rather than whatever is stacked on top at that pixel.
         let window_target = params.window_target();
@@ -950,10 +921,6 @@ impl ComputerUseLinux {
                         received,
                     });
                 }
-                portal_target_point = params
-                    .x
-                    .zip(params.y)
-                    .and_then(|(x, y)| coordinate_map.portal_point(x, y));
             }
         }
         let bounds = self.current_bounds().await;
@@ -990,7 +957,6 @@ impl ComputerUseLinux {
                         &params,
                         received,
                         input_guard,
-                        portal_target_point,
                         &held_modifiers,
                     )
                     .await;
@@ -1099,15 +1065,7 @@ impl ComputerUseLinux {
             }
         });
         let output = self
-            .click_at_point_with_modifiers(
-                x,
-                y,
-                &params,
-                received,
-                input_guard,
-                portal_target_point,
-                &held_modifiers,
-            )
+            .click_at_point_with_modifiers(x, y, &params, received, input_guard, &held_modifiers)
             .await;
         if output.0.ok {
             notes.extend(
@@ -1119,7 +1077,6 @@ impl ComputerUseLinux {
     }
 
     /// `click_at_point` with modifier keys held through ydotool around it.
-    #[allow(clippy::too_many_arguments)]
     async fn click_at_point_with_modifiers(
         &self,
         x: i32,
@@ -1127,12 +1084,11 @@ impl ComputerUseLinux {
         params: &ClickParams,
         received: Option<serde_json::Value>,
         input_guard: tokio::sync::OwnedMutexGuard<()>,
-        portal_target_point: Option<(i32, i32)>,
         held_modifiers: &[u16],
     ) -> Json<ActionOutput> {
         if held_modifiers.is_empty() {
             return self
-                .click_at_point(x, y, params, received, input_guard, portal_target_point)
+                .click_at_point(x, y, params, received, input_guard)
                 .await;
         }
         if let Err(message) = run_ydotool(&modifier_hold_args(held_modifiers, true)).await {
@@ -1145,7 +1101,7 @@ impl ComputerUseLinux {
             });
         }
         let output = self
-            .click_at_point(x, y, params, received, input_guard, portal_target_point)
+            .click_at_point(x, y, params, received, input_guard)
             .await;
         let release = run_ydotool(&modifier_hold_args(held_modifiers, false)).await;
         let note = match release {
@@ -1161,9 +1117,7 @@ impl ComputerUseLinux {
         Json(with_notes(output.0, [note]))
     }
 
-    /// Click a desktop coordinate through the best pointer backend available:
-    /// the uinput absolute pointer, then the remote desktop portal, then
-    /// xdotool on X11, then ydotool.
+    /// Click a desktop coordinate: the uinput absolute pointer, then ydotool.
     async fn click_at_point(
         &self,
         x: i32,
@@ -1171,14 +1125,12 @@ impl ComputerUseLinux {
         params: &ClickParams,
         received: Option<serde_json::Value>,
         input_guard: tokio::sync::OwnedMutexGuard<()>,
-        portal_target_point: Option<(i32, i32)>,
     ) -> Json<ActionOutput> {
         let button = mouse_button_code(params.button.as_deref());
         let click_count = params.click_count.unwrap_or(1).clamp(1, 10).to_string();
         // Preferred backend: the uinput absolute pointer. Unlike ydotool's
         // relative-only device (faked `--absolute` via pin-to-corner + relative
-        // move, which acceleration + fractional scaling distort) and unlike the
-        // portal (per-monitor coordinate scaling + an approval dialog), the
+        // move, which acceleration + fractional scaling distort), the
         // absolute pointer uses screenshot-pixel coordinates directly and
         // reports the point it emitted after desktop-edge clamping.
         if let Some(landing) = self
@@ -1202,127 +1154,6 @@ impl ComputerUseLinux {
             ));
         }
         let off_screen_note = self.off_screen_note_for_point(x, y).await;
-        if let Some(session) = self.cached_portal_pointer_session() {
-            let Some((portal_x, portal_y)) =
-                portal_target_point.or_else(|| self.logical_portal_point(&session, x, y))
-            else {
-                self.clear_portal_pointer_session(&session);
-                return Json(with_notes(
-                    portal_coordinate_error("click", received),
-                    off_screen_note.clone(),
-                ));
-            };
-            match portal_click(
-                &session,
-                portal_x,
-                portal_y,
-                PointerButton::from_name(params.button.as_deref()),
-                params.click_count.unwrap_or(1).clamp(1, 10),
-            )
-            .await
-            {
-                Ok(()) => {
-                    return Json(with_notes(
-                        ActionOutput {
-                            ok: true,
-                            implemented: true,
-                            action: "click".to_string(),
-                            message: "Action sent through the remote desktop portal.".to_string(),
-                            received,
-                        },
-                        off_screen_note.clone(),
-                    ));
-                }
-                Err(error) => {
-                    self.clear_portal_pointer_session(&session);
-                    return Json(with_notes(
-                        portal_action_error("click", error, received),
-                        off_screen_note.clone(),
-                    ));
-                }
-            }
-        } else if self.should_prefer_portal_pointer_backend().await {
-            match self.ensure_portal_pointer_session().await {
-                Ok(Some(session)) => {
-                    let Some((portal_x, portal_y)) =
-                        portal_target_point.or_else(|| self.logical_portal_point(&session, x, y))
-                    else {
-                        self.clear_portal_pointer_session(&session);
-                        return Json(with_notes(
-                            portal_coordinate_error("click", received),
-                            off_screen_note.clone(),
-                        ));
-                    };
-                    match portal_click(
-                        &session,
-                        portal_x,
-                        portal_y,
-                        PointerButton::from_name(params.button.as_deref()),
-                        params.click_count.unwrap_or(1).clamp(1, 10),
-                    )
-                    .await
-                    {
-                        Ok(()) => {
-                            return Json(with_notes(
-                                ActionOutput {
-                                    ok: true,
-                                    implemented: true,
-                                    action: "click".to_string(),
-                                    message: "Action sent through the remote desktop portal."
-                                        .to_string(),
-                                    received,
-                                },
-                                off_screen_note.clone(),
-                            ));
-                        }
-                        Err(error) => {
-                            self.clear_portal_pointer_session(&session);
-                            return Json(with_notes(
-                                portal_action_error("click", error, received),
-                                off_screen_note.clone(),
-                            ));
-                        }
-                    }
-                }
-                Ok(None) => {}
-                Err(_) => {}
-            }
-        }
-        if self.should_prefer_xdotool_pointer() {
-            if let Some(xdotool_args) = xdotool_pointer_click_args(
-                x,
-                y,
-                params.click_count.unwrap_or(1).clamp(1, 10),
-                params.button.as_deref(),
-            ) {
-                let ydotool_commands = vec![
-                    absolute_mousemove_args(x, y),
-                    vec![
-                        "click".to_string(),
-                        "--repeat".to_string(),
-                        click_count.clone(),
-                        button.clone(),
-                    ],
-                ];
-                let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
-                    run_xdotool_pointer_or_fallback(Path::new("xdotool"), &xdotool_args, || async {
-                        run_ydotool_sequence(&ydotool_commands).await
-                    })
-                    .await
-                })
-                .await;
-                let _input_guard = input_guard;
-                let used_xdotool = result
-                    .as_ref()
-                    .is_ok_and(|result| result.backend == KeyboardCommandBackend::Xdotool);
-                let mut output =
-                    action_result("click", result.map(|result| result.outputs), received);
-                if output.ok && used_xdotool {
-                    output.message = "Action sent through xdotool (X11 XTEST).".to_string();
-                }
-                return Json(with_notes(output, off_screen_note));
-            }
-        }
         let commands = vec![
             absolute_mousemove_args(x, y),
             vec![
@@ -1474,7 +1305,6 @@ impl ComputerUseLinux {
             });
         }
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
-        let mut portal_target_point = None;
         let units = ((params.pages.unwrap_or(1.0).abs().max(0.1) * 5.0).round() as i32).max(1);
         // Raise/focus the target window first (parity with click) so wheel
         // events land on the intended app.
@@ -1538,10 +1368,6 @@ impl ComputerUseLinux {
                         received,
                     });
                 }
-                portal_target_point = params
-                    .x
-                    .zip(params.y)
-                    .and_then(|(x, y)| coordinate_map.portal_point(x, y));
             } else if params.x.is_none() && params.y.is_none() && params.element_index.is_none() {
                 // A window target without a point would otherwise scroll
                 // whatever happens to sit under the pointer: focusing does not
@@ -1580,10 +1406,6 @@ impl ComputerUseLinux {
                         received,
                     });
                 }
-                portal_target_point = params
-                    .x
-                    .zip(params.y)
-                    .and_then(|(x, y)| coordinate_map.portal_point(x, y));
             }
         }
         let mut notes = Vec::new();
@@ -1668,82 +1490,6 @@ impl ComputerUseLinux {
                 ));
             }
             point_notes.extend(self.off_screen_note_for_point(x, y).await);
-        }
-        if let Some(session) = self.cached_portal_pointer_session() {
-            let mapped_target = match (portal_target_point, target_point) {
-                (Some(point), _) => Some(Some(point)),
-                (None, Some((x, y))) => self.logical_portal_point(&session, x, y).map(Some),
-                (None, None) => Some(None),
-            };
-            let Some(portal_target_point) = mapped_target else {
-                self.clear_portal_pointer_session(&session);
-                return Json(with_notes(
-                    portal_coordinate_error("scroll", received),
-                    point_notes.clone(),
-                ));
-            };
-            match portal_scroll(&session, portal_target_point, direction, units).await {
-                Ok(()) => {
-                    return Json(with_notes(
-                        ActionOutput {
-                            ok: true,
-                            implemented: true,
-                            action: "scroll".to_string(),
-                            message: "Action sent through the remote desktop portal.".to_string(),
-                            received,
-                        },
-                        point_notes.clone(),
-                    ));
-                }
-                Err(error) => {
-                    self.clear_portal_pointer_session(&session);
-                    return Json(with_notes(
-                        portal_action_error("scroll", error, received),
-                        point_notes.clone(),
-                    ));
-                }
-            }
-        } else if self.should_prefer_portal_pointer_backend().await {
-            match self.ensure_portal_pointer_session().await {
-                Ok(Some(session)) => {
-                    let mapped_target = match (portal_target_point, target_point) {
-                        (Some(point), _) => Some(Some(point)),
-                        (None, Some((x, y))) => self.logical_portal_point(&session, x, y).map(Some),
-                        (None, None) => Some(None),
-                    };
-                    let Some(portal_target_point) = mapped_target else {
-                        self.clear_portal_pointer_session(&session);
-                        return Json(with_notes(
-                            portal_coordinate_error("scroll", received),
-                            point_notes.clone(),
-                        ));
-                    };
-                    match portal_scroll(&session, portal_target_point, direction, units).await {
-                        Ok(()) => {
-                            return Json(with_notes(
-                                ActionOutput {
-                                    ok: true,
-                                    implemented: true,
-                                    action: "scroll".to_string(),
-                                    message: "Action sent through the remote desktop portal."
-                                        .to_string(),
-                                    received,
-                                },
-                                point_notes.clone(),
-                            ));
-                        }
-                        Err(error) => {
-                            self.clear_portal_pointer_session(&session);
-                            return Json(with_notes(
-                                portal_action_error("scroll", error, received),
-                                point_notes.clone(),
-                            ));
-                        }
-                    }
-                }
-                Ok(None) => {}
-                Err(_) => {}
-            }
         }
         let (dx, dy) = ydotool_wheel_delta(direction, units);
         let mut sequence = Vec::new();
@@ -1861,72 +1607,6 @@ impl ComputerUseLinux {
                 });
             }
         }
-        if let Some(session) = self.cached_portal_pointer_session() {
-            let _ = self.capture_space_rect().await;
-            let Some((start_x, start_y)) =
-                self.logical_portal_point(&session, params.start_x, params.start_y)
-            else {
-                self.clear_portal_pointer_session(&session);
-                return Json(portal_coordinate_error("drag", received));
-            };
-            let Some((end_x, end_y)) =
-                self.logical_portal_point(&session, params.end_x, params.end_y)
-            else {
-                self.clear_portal_pointer_session(&session);
-                return Json(portal_coordinate_error("drag", received));
-            };
-            match portal_drag(&session, start_x, start_y, end_x, end_y).await {
-                Ok(()) => {
-                    return Json(ActionOutput {
-                        ok: true,
-                        implemented: true,
-                        action: "drag".to_string(),
-                        message: "Action sent through the remote desktop portal.".to_string(),
-                        received,
-                    });
-                }
-                Err(error) => {
-                    self.clear_portal_pointer_session(&session);
-                    return Json(portal_action_error("drag", error, received));
-                }
-            }
-        } else if self.should_prefer_portal_pointer_backend().await {
-            let _ = self.capture_space_rect().await;
-            match self.ensure_portal_pointer_session().await {
-                Ok(Some(session)) => {
-                    let Some((start_x, start_y)) =
-                        self.logical_portal_point(&session, params.start_x, params.start_y)
-                    else {
-                        self.clear_portal_pointer_session(&session);
-                        return Json(portal_coordinate_error("drag", received));
-                    };
-                    let Some((end_x, end_y)) =
-                        self.logical_portal_point(&session, params.end_x, params.end_y)
-                    else {
-                        self.clear_portal_pointer_session(&session);
-                        return Json(portal_coordinate_error("drag", received));
-                    };
-                    match portal_drag(&session, start_x, start_y, end_x, end_y).await {
-                        Ok(()) => {
-                            return Json(ActionOutput {
-                                ok: true,
-                                implemented: true,
-                                action: "drag".to_string(),
-                                message: "Action sent through the remote desktop portal."
-                                    .to_string(),
-                                received,
-                            });
-                        }
-                        Err(error) => {
-                            self.clear_portal_pointer_session(&session);
-                            return Json(portal_action_error("drag", error, received));
-                        }
-                    }
-                }
-                Ok(None) => {}
-                Err(_) => {}
-            }
-        }
         let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
             run_ydotool_drag(params.start_x, params.start_y, params.end_x, params.end_y).await
         })
@@ -2035,55 +1715,6 @@ impl ComputerUseLinux {
         received: Option<serde_json::Value>,
         input_guard: tokio::sync::OwnedMutexGuard<()>,
     ) -> (Option<tokio::sync::OwnedMutexGuard<()>>, ActionOutput) {
-        let Some((chord_modifiers, chord_key)) = key_chord(key) else {
-            return (
-                Some(input_guard),
-                ActionOutput {
-                    ok: false,
-                    implemented: true,
-                    action: "press_key".to_string(),
-                    message: format!(
-                        "Unsupported key {key:?}. Use names like Enter, Escape, Tab, ArrowLeft, Super, Ctrl+L, or a single US keyboard letter/digit."
-                    ),
-                    received,
-                },
-            );
-        };
-        if self.should_prefer_portal_keyboard_for_chords().await {
-            match self.ensure_portal_keyboard_session().await {
-                Ok(Some(session)) => {
-                    let modifiers: Vec<i32> =
-                        chord_modifiers.iter().map(|m| i32::from(*m)).collect();
-                    match press_keycode_chord(&session, &modifiers, i32::from(chord_key)).await {
-                        Ok(()) => {
-                            return (
-                                Some(input_guard),
-                                successful_action_with_focus(
-                                    "press_key",
-                                    "Action sent through the remote desktop portal.",
-                                    received,
-                                    focus,
-                                ),
-                            );
-                        }
-                        Err(error) => {
-                            self.clear_portal_keyboard_session(&session);
-                            return (
-                                Some(input_guard),
-                                action_result_with_focus(
-                                    "press_key",
-                                    Err(format!("{error:#}")),
-                                    received,
-                                    focus,
-                                ),
-                            );
-                        }
-                    }
-                }
-                Ok(None) => {}
-                Err(_) => {}
-            }
-        }
         let Some(key_events) = key_sequence(key) else {
             return (
                 Some(input_guard),
@@ -2098,37 +1729,10 @@ impl ComputerUseLinux {
                 },
             );
         };
-        // X11: prefer xdotool/XTEST. ydotool's raw evdev scancodes get
-        // re-mapped by the active XKB layout on X11, so named keys and chords
-        // arrive as stray glyphs instead of real key events (issue #58).
-        if self.should_prefer_xdotool_keyboard() {
-            if let Some(spec) = xdotool_key_spec(key) {
-                let xdotool_args = vec!["key".to_string(), "--clearmodifiers".to_string(), spec];
-                let ydotool_args =
-                    ydotool_key_args(key_events.clone(), !chord_modifiers.is_empty());
-                let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
-                    run_xdotool_or_fallback(Path::new("xdotool"), &xdotool_args, || {
-                        run_ydotool(&ydotool_args)
-                    })
-                    .await
-                })
-                .await;
-                let used_xdotool = result
-                    .as_ref()
-                    .is_ok_and(|result| result.backend == KeyboardCommandBackend::Xdotool);
-                let mut output = action_result_with_focus(
-                    "press_key",
-                    result.map(|result| vec![result.output]),
-                    received,
-                    focus,
-                );
-                if used_xdotool {
-                    output.message = "Action sent through xdotool (X11 XTEST).".to_string();
-                }
-                return (input_guard, output);
-            }
-        }
-        let args = ydotool_key_args(key_events, !chord_modifiers.is_empty());
+        // A chord holds its modifiers down across the key press; a bare key
+        // does not, and ydotool needs to be told which shape this is.
+        let is_chord = key_chord(key).is_some_and(|(modifiers, _)| !modifiers.is_empty());
+        let args = ydotool_key_args(key_events, is_chord);
         let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
             run_ydotool(&args).await.map(|output| vec![output])
         })
@@ -2196,105 +1800,9 @@ impl ComputerUseLinux {
                 });
             }
         };
-        if self.should_prefer_kde_clipboard_text_backend() {
-            match self.ensure_portal_keyboard_session().await {
-                Ok(Some(session)) => {
-                    let _clipboard_guard = self.kde_clipboard_lock.lock().await;
-                    match run_kde_clipboard_paste_text(&session, &params.text).await {
-                        Ok(message) => {
-                            let notes = self.input_landing_notes(focus.as_ref(), true).await;
-                            return Json(with_notes(
-                                successful_action_with_focus(
-                                    "type_text",
-                                    &message,
-                                    received,
-                                    focus,
-                                ),
-                                notes,
-                            ));
-                        }
-                        Err(error) => {
-                            if error.clear_portal_keyboard_session {
-                                self.clear_portal_keyboard_session(&session);
-                            }
-                            if !error.can_fallback_to_ydotool {
-                                return Json(action_result_with_focus(
-                                    "type_text",
-                                    Err(error.message),
-                                    received,
-                                    focus,
-                                ));
-                            }
-                        }
-                    }
-                }
-                Ok(None) => {}
-                Err(_) => {}
-            }
-        }
-        if self.should_prefer_portal_keyboard_backend().await {
-            if let Ok(keysyms) = keysyms_for_text(&params.text) {
-                match self.ensure_portal_keyboard_session().await {
-                    Ok(Some(session)) => match type_text_with_keysyms(&session, &keysyms).await {
-                        Ok(()) => {
-                            let notes = self.input_landing_notes(focus.as_ref(), true).await;
-                            return Json(with_notes(
-                                successful_action_with_focus(
-                                    "type_text",
-                                    "Action sent through the remote desktop portal.",
-                                    received,
-                                    focus,
-                                ),
-                                notes,
-                            ));
-                        }
-                        Err(error) => {
-                            self.clear_portal_keyboard_session(&session);
-                            return Json(action_result_with_focus(
-                                "type_text",
-                                Err(format!("{error:#}")),
-                                received,
-                                focus,
-                            ));
-                        }
-                    },
-                    Ok(None) => {}
-                    Err(_) => {}
-                }
-            }
-        }
         // X11: xdotool type resolves keysyms against the live XKB layout.
         // ydotool's raw scancodes get re-mapped by X11 and mangle symbols and
         // digits (`_` → `%`, `1` → `+`) even on a plain US layout (issue #58).
-        if self.should_prefer_xdotool_keyboard() {
-            let args = xdotool_type_args(&params.text);
-            let text = params.text.clone();
-            let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
-                run_xdotool_or_fallback(Path::new("xdotool"), &args, || {
-                    run_ydotool_type_text(&text)
-                })
-                .await
-            })
-            .await;
-            let _input_guard = input_guard;
-            let used_xdotool = result
-                .as_ref()
-                .is_ok_and(|result| result.backend == KeyboardCommandBackend::Xdotool);
-            let mut output = action_result_with_focus(
-                "type_text",
-                result.map(|result| vec![result.output]),
-                received,
-                focus.clone(),
-            );
-            if used_xdotool {
-                output.message = "Action sent through xdotool (X11 XTEST).".to_string();
-            }
-            if output.ok {
-                let notes = self.input_landing_notes(focus.as_ref(), true).await;
-                output = with_notes(output, notes);
-            }
-            return Json(output);
-        }
         if self.should_prefer_wtype_keyboard() {
             let text = params.text.clone();
             let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
@@ -2380,6 +1888,28 @@ impl ComputerUseLinux {
         let target = params.target.clone().into_target();
         self.window_geometry_op(received, &target, |window| async move {
             registry::resize_window(&window, params.width, params.height).await
+        })
+        .await
+    }
+
+    #[tool(
+        name = "set_window_floating",
+        description = "Float a window, or tile it again. On Hyprland a tiled window cannot be given an exact geometry, so move_window and resize_window refuse one; this is how to clear that refusal. Float the window, move or resize it, then tile it again to restore the layout. Reports the state Hyprland ended up in.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn set_window_floating(
+        &self,
+        Parameters(params): Parameters<SetWindowFloatingParams>,
+    ) -> Json<WindowGeometryOutput> {
+        let received = Some(serde_json::json!(params.clone()));
+        let target = params.target.clone().into_target();
+        self.window_geometry_op(received, &target, |window| async move {
+            registry::set_window_floating(&window, params.floating).await
         })
         .await
     }
@@ -2761,6 +2291,14 @@ struct MoveWindowParams {
     x: i32,
     /// New frame-top in desktop coordinates.
     y: i32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct SetWindowFloatingParams {
+    #[serde(flatten)]
+    target: ActivateWindowParams,
+    /// True to float the window, false to tile it again.
+    floating: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -3551,96 +3089,6 @@ impl ComputerUseLinux {
         session_is_wayland(session_type.as_deref(), wayland_display.as_deref())
     }
 
-    // The Wayland remote-desktop portal is now a *fallback* for input: when a
-    // compatible ydotool CLI and working `ydotoold` socket are present we prefer
-    // ydotool, because it injects input without a permission prompt. GNOME
-    // refuses to persist remote-desktop
-    // grants (`org.freedesktop.portal.Error: Remote desktop sessions cannot
-    // persist`), so the portal would otherwise re-prompt on every new session.
-    // `COMPUTER_USE_LINUX_FORCE_YDOTOOL_*=1` always uses ydotool;
-    // `COMPUTER_USE_LINUX_FORCE_PORTAL_*=1` always uses the portal.
-    async fn should_prefer_portal_pointer_backend(&self) -> bool {
-        if env_flag_enabled("COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER") {
-            return false;
-        }
-        if env_flag_enabled("COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER") {
-            return self.is_wayland_session();
-        }
-        should_prefer_portal_backend_by_default(
-            self.is_wayland_session(),
-            ydotool_backend_available().await,
-        )
-    }
-
-    async fn should_prefer_portal_keyboard_backend(&self) -> bool {
-        if env_flag_enabled("COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD") {
-            return false;
-        }
-        if self.should_prefer_xdotool_keyboard() {
-            return false;
-        }
-        if env_flag_enabled("COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD") {
-            return self.is_wayland_session() && !self.is_kde_wayland_session();
-        }
-        !self.is_kde_wayland_session()
-            && should_prefer_portal_backend_by_default(
-                self.is_wayland_session(),
-                ydotool_backend_available().await,
-            )
-    }
-
-    /// Portal keyboard policy for `press_key` chords. Unlike literal text
-    /// (where KDE prefers the clipboard paste backend), key chords have no
-    /// clipboard route, so the portal keyboard session is preferred on ANY
-    /// Wayland session — including Plasma. An already-active keyboard
-    /// session (e.g. established by a KDE clipboard paste) is reused even
-    /// when ydotool is available, so the consent the user already granted
-    /// keeps covering key chords; otherwise the portal is preferred only
-    /// when ydotool is absent or the portal is forced.
-    async fn should_prefer_portal_keyboard_for_chords(&self) -> bool {
-        if env_flag_enabled("COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD") {
-            return false;
-        }
-        if self.should_prefer_xdotool_keyboard() {
-            return false;
-        }
-        if !self.is_wayland_session() {
-            return false;
-        }
-        if self.cached_portal_keyboard_session().is_some()
-            || env_flag_enabled("COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD")
-        {
-            return true;
-        }
-        !ydotool_backend_available().await
-    }
-
-    fn should_prefer_kde_clipboard_text_backend(&self) -> bool {
-        !env_flag_enabled("COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD")
-            && !self.should_prefer_xdotool_keyboard()
-            && self.is_kde_wayland_session()
-    }
-
-    /// Keyboard policy for X11 sessions: prefer `xdotool` (XTEST).
-    ///
-    /// ydotool writes raw evdev scancodes to a virtual uinput device. On X11
-    /// the server then re-interprets them through the active XKB layout, so
-    /// `press_key "Return"` and chords like `ctrl+a` land as stray characters,
-    /// and literal text can mangle symbols/digits (issue #58). XTEST resolves
-    /// keysyms against the live layout instead.
-    ///
-    /// `COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD=1` opts out;
-    /// `COMPUTER_USE_LINUX_FORCE_XDOTOOL_KEYBOARD=1` forces it on.
-    fn should_prefer_xdotool_keyboard(&self) -> bool {
-        prefer_xdotool_keyboard(
-            env_flag_enabled("COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD"),
-            env_flag_enabled("COMPUTER_USE_LINUX_FORCE_XDOTOOL_KEYBOARD"),
-            self.is_wayland_session(),
-            env_var_non_empty("DISPLAY"),
-            xdotool_available(),
-        )
-    }
-
     fn should_prefer_wtype_keyboard(&self) -> bool {
         prefer_wtype_keyboard(
             env_flag_enabled("COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD"),
@@ -3650,105 +3098,6 @@ impl ComputerUseLinux {
             ),
             wtype_available(),
         )
-    }
-
-    fn should_prefer_xdotool_pointer(&self) -> bool {
-        crate::diagnostics::hydrate_session_bus_env();
-        prefer_xdotool_pointer(
-            env_flag_enabled("COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER"),
-            env::var("XDG_SESSION_TYPE").ok().as_deref(),
-            env_var_non_empty("DISPLAY"),
-            env::var("WAYLAND_DISPLAY").ok().as_deref(),
-            xdotool_available(),
-        )
-    }
-
-    fn is_kde_wayland_session(&self) -> bool {
-        self.is_wayland_session()
-            && (env_contains("XDG_CURRENT_DESKTOP", "kde")
-                || env_contains("DESKTOP_SESSION", "plasma"))
-    }
-
-    fn cached_portal_pointer_session(&self) -> Option<PortalPointerSession> {
-        let mut cached = self.portal_pointer_session.lock().ok()?;
-        if cached.as_ref().is_some_and(|session| !session.is_valid()) {
-            *cached = None;
-        }
-        cached.clone()
-    }
-
-    fn clear_portal_pointer_session(&self, failed: &PortalPointerSession) {
-        failed.invalidate_and_close();
-        if let Ok(mut cached) = self.portal_pointer_session.lock() {
-            if cached
-                .as_ref()
-                .is_some_and(|session| session.same_session(failed))
-            {
-                *cached = None;
-            }
-        }
-    }
-
-    fn cached_portal_keyboard_session(&self) -> Option<PortalKeyboardSession> {
-        let mut cached = self.portal_keyboard_session.lock().ok()?;
-        if cached.as_ref().is_some_and(|session| !session.is_valid()) {
-            *cached = None;
-        }
-        cached.clone()
-    }
-
-    fn clear_portal_keyboard_session(&self, failed: &PortalKeyboardSession) {
-        failed.invalidate_and_close();
-        if let Ok(mut cached) = self.portal_keyboard_session.lock() {
-            if cached
-                .as_ref()
-                .is_some_and(|session| session.same_session(failed))
-            {
-                *cached = None;
-            }
-        }
-    }
-
-    async fn ensure_portal_pointer_session(&self) -> Result<Option<PortalPointerSession>> {
-        if !self.should_prefer_portal_pointer_backend().await {
-            return Ok(None);
-        }
-        if let Some(session) = self.cached_portal_pointer_session() {
-            return Ok(Some(session));
-        }
-
-        let _guard = self.portal_session_init_lock.lock().await;
-        if let Some(session) = self.cached_portal_pointer_session() {
-            return Ok(Some(session));
-        }
-
-        let session = start_portal_pointer_session().await?;
-        if let Ok(mut cached) = self.portal_pointer_session.lock() {
-            *cached = Some(session.clone());
-        }
-        Ok(Some(session))
-    }
-
-    async fn ensure_portal_keyboard_session(&self) -> Result<Option<PortalKeyboardSession>> {
-        if env_flag_enabled("COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD")
-            || !self.is_wayland_session()
-        {
-            return Ok(None);
-        }
-        if let Some(session) = self.cached_portal_keyboard_session() {
-            return Ok(Some(session));
-        }
-
-        let _guard = self.portal_session_init_lock.lock().await;
-        if let Some(session) = self.cached_portal_keyboard_session() {
-            return Ok(Some(session));
-        }
-
-        let session = start_portal_keyboard_session().await?;
-        if let Ok(mut cached) = self.portal_keyboard_session.lock() {
-            *cached = Some(session.clone());
-        }
-        Ok(Some(session))
     }
 
     async fn resolve_window_context(
@@ -3840,53 +3189,8 @@ impl ComputerUseLinux {
                 "targeted screenshot has unusable window bounds; refusing to return the full desktop"
             )
         })?;
-        let monitors = if window.backend == GNOME_SHELL_EXTENSION_BACKEND {
-            Some(
-                crate::windowing::backends::gnome::extension_monitor_layout()
-                    .await
-                    .map_err(|error| {
-                        anyhow::anyhow!(
-                            "GNOME targeted screenshot requires logical monitor geometry: {error:#}"
-                        )
-                    })?
-                    .into_iter()
-                    .map(|monitor| (monitor.x, monitor.y, monitor.width, monitor.height))
-                    .collect(),
-            )
-        } else if window.backend == GNOME_SHELL_INTROSPECT_BACKEND {
-            crate::windowing::backends::gnome::extension_monitor_layout()
-                .await
-                .ok()
-                .map(|monitors| {
-                    monitors
-                        .into_iter()
-                        .map(|monitor| (monitor.x, monitor.y, monitor.width, monitor.height))
-                        .collect()
-                })
-        } else if window.backend == KWIN_BACKEND {
-            Some(vec![
-                crate::windowing::backends::kwin::logical_desktop_rect()
-                    .await
-                    .map_err(|error| {
-                        anyhow::anyhow!(
-                            "KWin targeted screenshot requires logical workspace geometry: {error:#}"
-                        )
-                    })?,
-            ])
-        } else {
-            None
-        };
-        let (full_capture_rect, portal_rect) = match monitors {
-            Some(monitors) => (
-                logical_window_crop_rect(bounds, &monitors, capture_width, capture_height)?,
-                Some(logical_rect),
-            ),
-            None => (logical_rect, None),
-        };
         Ok(WindowCoordinateMap {
-            capture_rect: clip_capture_rect(full_capture_rect, capture_width, capture_height)?,
-            full_capture_rect,
-            portal_rect,
+            capture_rect: clip_capture_rect(logical_rect, capture_width, capture_height)?,
         })
     }
 
@@ -3898,41 +3202,25 @@ impl ComputerUseLinux {
             .focused_window
             .as_ref()
             .unwrap_or(&focus.requested_window);
-        if !matches!(
-            window.backend.as_str(),
-            GNOME_SHELL_EXTENSION_BACKEND | GNOME_SHELL_INTROSPECT_BACKEND | KWIN_BACKEND
-        ) {
-            let full_capture_rect = window
-                .bounds
-                .as_ref()
-                .and_then(window_crop_rect)
-                .ok_or_else(|| {
-                    "Window-relative coordinates require usable target-window bounds.".to_string()
-                })?;
-            let capture_rect = self
-                .desktop_size
-                .lock()
-                .ok()
-                .and_then(|guard| *guard)
-                .map(|(width, height)| {
-                    clip_capture_rect(full_capture_rect, width, height).map_err(|error| {
-                        format!("Could not map target-window coordinates: {error:#}")
-                    })
-                })
-                .transpose()?
-                .unwrap_or(full_capture_rect);
-            return Ok(WindowCoordinateMap {
-                capture_rect,
-                full_capture_rect,
-                portal_rect: None,
-            });
-        }
-        let (_, _, width, height) = self.capture_space_rect().await.ok_or_else(|| {
-            "Could not determine screenshot dimensions for window-relative coordinates.".to_string()
-        })?;
-        self.window_coordinate_map_for_dimensions(window, width as u32, height as u32)
-            .await
-            .map_err(|error| format!("Could not map target-window coordinates: {error:#}"))
+        let full_capture_rect = window
+            .bounds
+            .as_ref()
+            .and_then(window_crop_rect)
+            .ok_or_else(|| {
+                "Window-relative coordinates require usable target-window bounds.".to_string()
+            })?;
+        let capture_rect = self
+            .desktop_size
+            .lock()
+            .ok()
+            .and_then(|guard| *guard)
+            .map(|(width, height)| {
+                clip_capture_rect(full_capture_rect, width, height)
+                    .map_err(|error| format!("Could not map target-window coordinates: {error:#}"))
+            })
+            .transpose()?
+            .unwrap_or(full_capture_rect);
+        Ok(WindowCoordinateMap { capture_rect })
     }
 
     async fn resolve_accessibility_app_filter(
@@ -4182,36 +3470,6 @@ impl ComputerUseLinux {
         }
     }
 
-    fn logical_portal_point(
-        &self,
-        session: &PortalPointerSession,
-        x: i32,
-        y: i32,
-    ) -> Option<(i32, i32)> {
-        let capture_size = self.desktop_size.lock().ok().and_then(|guard| *guard);
-        session.logical_point_from_capture(x, y, capture_size)
-    }
-
-    /// COORDINATE SPACES: window bounds (list_windows / extension frame rects)
-    /// and the extension monitor layout are in LOGICAL pixels, while click/
-    /// scroll coordinates and screenshot captures are in PHYSICAL capture
-    /// pixels. On fractionally-scaled displays the two differ, so each check
-    /// below only ever compares values from the same space.
-    ///
-    /// Logical monitor rectangles from the GNOME Shell extension, for checks
-    /// against logical window bounds. None when the extension is unavailable.
-    async fn logical_monitor_rects(&self) -> Option<Vec<(i32, i32, i32, i32)>> {
-        let monitors = crate::windowing::backends::gnome::extension_monitor_layout()
-            .await
-            .ok()?;
-        (!monitors.is_empty()).then(|| {
-            monitors
-                .iter()
-                .map(|m| (m.x, m.y, m.width, m.height))
-                .collect()
-        })
-    }
-
     /// Physical capture-space desktop rectangle (union of monitors as captured
     /// by the screenshot pipeline), for checks against click coordinates.
     /// Best-effort; None disables the check.
@@ -4238,14 +3496,9 @@ impl ComputerUseLinux {
         if bounds.width == 0 || bounds.height == 0 {
             return None;
         }
-        // Window bounds are logical pixels: prefer the extension's logical
-        // monitor layout (same space). The physical capture rect is a safe
-        // fallback — on scaled displays it is at least as large as the logical
-        // union, so it can only under-warn, never false-positive.
-        let rects = match self.logical_monitor_rects().await {
-            Some(rects) => rects,
-            None => vec![self.capture_space_rect().await?],
-        };
+        // Hyprland window bounds are already mapped into capture space by the
+        // backend, so the captured desktop rectangle is the right yardstick.
+        let rects = vec![self.capture_space_rect().await?];
         let (w, h) = (bounds.width as i64, bounds.height as i64);
         let window_area = w * h;
         let mut visible_area = 0_i64;
@@ -5114,6 +4367,15 @@ fn primary_action(actions: &[AccessibilityAction]) -> Option<&AccessibilityActio
     actions.first()
 }
 
+/// Which way a wheel event goes. Four directions, no backend meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
 fn parse_scroll_direction(direction: &str) -> Option<ScrollDirection> {
     match direction.trim().to_ascii_lowercase().as_str() {
         "up" => Some(ScrollDirection::Up),
@@ -5486,21 +4748,9 @@ fn trimmed_nonempty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
-fn env_contains(key: &str, needle: &str) -> bool {
-    env::var(key)
-        .ok()
-        .is_some_and(|value| value.to_ascii_lowercase().contains(needle))
-}
-
 /// True when an environment variable is set to `"1"` (an explicit on switch).
 fn env_flag_enabled(key: &str) -> bool {
     env::var(key).ok().as_deref() == Some("1")
-}
-
-fn env_var_non_empty(key: &str) -> bool {
-    env::var(key)
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
 }
 
 /// Return the base64 payload of a `data:` URL (or the original string if bare).
@@ -5520,37 +4770,6 @@ fn session_is_wayland(session_type: Option<&str>, wayland_display: Option<&str>)
         Some(value) => value.eq_ignore_ascii_case("wayland"),
         None => wayland_display.is_some_and(|value| !value.trim().is_empty()),
     }
-}
-
-fn native_x11_xdotool_pointer_session(
-    session_type: Option<&str>,
-    wayland_display: Option<&str>,
-) -> bool {
-    session_type.is_some_and(|value| value.trim().eq_ignore_ascii_case("x11"))
-        && wayland_display.is_none_or(|value| value.trim().is_empty())
-}
-
-fn prefer_xdotool_pointer(
-    force_ydotool: bool,
-    session_type: Option<&str>,
-    display_available: bool,
-    wayland_display: Option<&str>,
-    xdotool_available: bool,
-) -> bool {
-    !force_ydotool
-        && native_x11_xdotool_pointer_session(session_type, wayland_display)
-        && display_available
-        && xdotool_available
-}
-
-fn prefer_xdotool_keyboard(
-    force_ydotool: bool,
-    force_xdotool: bool,
-    is_wayland: bool,
-    display_available: bool,
-    xdotool_available: bool,
-) -> bool {
-    !force_ydotool && display_available && xdotool_available && (force_xdotool || !is_wayland)
 }
 
 fn prepare_app_state_screenshot(
@@ -5594,97 +4813,6 @@ fn ensure_readonly_screenshot_target_is_visible(window: &WindowInfo) -> Result<(
 #[derive(Debug, Clone, Copy)]
 struct WindowCoordinateMap {
     capture_rect: (i32, i32, u32, u32),
-    full_capture_rect: (i32, i32, u32, u32),
-    portal_rect: Option<(i32, i32, u32, u32)>,
-}
-
-impl WindowCoordinateMap {
-    fn portal_point(&self, capture_x: i32, capture_y: i32) -> Option<(i32, i32)> {
-        let (portal_x, portal_y, portal_width, portal_height) = self.portal_rect?;
-        let (full_x, full_y, full_width, full_height) = self.full_capture_rect;
-        Some((
-            map_coordinate_between_rects(capture_x, full_x, full_width, portal_x, portal_width),
-            map_coordinate_between_rects(capture_y, full_y, full_height, portal_y, portal_height),
-        ))
-    }
-}
-
-fn map_coordinate_between_rects(
-    value: i32,
-    source_origin: i32,
-    source_size: u32,
-    target_origin: i32,
-    target_size: u32,
-) -> i32 {
-    let offset = i64::from(value) - i64::from(source_origin);
-    let scaled = offset.saturating_mul(i64::from(target_size)) / i64::from(source_size.max(1));
-    (i64::from(target_origin) + scaled).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
-}
-
-fn logical_window_crop_rect(
-    bounds: &crate::windowing::WindowBounds,
-    monitors: &[(i32, i32, i32, i32)],
-    capture_width: u32,
-    capture_height: u32,
-) -> Result<(i32, i32, u32, u32)> {
-    let mut monitors = monitors
-        .iter()
-        .filter(|(_, _, width, height)| *width > 0 && *height > 0);
-    let first = monitors
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("desktop returned no usable monitor geometry"))?;
-    let (mut min_x, mut min_y) = (i64::from(first.0), i64::from(first.1));
-    let (mut max_x, mut max_y) = (
-        i64::from(first.0) + i64::from(first.2),
-        i64::from(first.1) + i64::from(first.3),
-    );
-    for (x, y, width, height) in monitors {
-        min_x = min_x.min(i64::from(*x));
-        min_y = min_y.min(i64::from(*y));
-        max_x = max_x.max(i64::from(*x) + i64::from(*width));
-        max_y = max_y.max(i64::from(*y) + i64::from(*height));
-    }
-    let logical_width = max_x - min_x;
-    let logical_height = max_y - min_y;
-    if logical_width <= 0 || logical_height <= 0 || capture_width == 0 || capture_height == 0 {
-        anyhow::bail!("screenshot or monitor geometry is empty");
-    }
-    let scale_x = f64::from(capture_width) / logical_width as f64;
-    let scale_y = f64::from(capture_height) / logical_height as f64;
-    if !scale_x.is_finite() || !scale_y.is_finite() || (scale_x - scale_y).abs() > 0.01 {
-        anyhow::bail!(
-            "captured desktop {}x{} does not have a uniform scale relative to the logical monitor layout {}x{}",
-            capture_width,
-            capture_height,
-            logical_width,
-            logical_height
-        );
-    }
-
-    let x = i64::from(
-        bounds
-            .x
-            .ok_or_else(|| anyhow::anyhow!("window x is unavailable"))?,
-    );
-    let y = i64::from(
-        bounds
-            .y
-            .ok_or_else(|| anyhow::anyhow!("window y is unavailable"))?,
-    );
-    if bounds.width == 0 || bounds.height == 0 {
-        anyhow::bail!("window bounds are empty");
-    }
-    let left = (((x - min_x) as f64) * scale_x).floor() as i64;
-    let top = (((y - min_y) as f64) * scale_y).floor() as i64;
-    let right = (((x + i64::from(bounds.width) - min_x) as f64) * scale_x).ceil() as i64;
-    let bottom = (((y + i64::from(bounds.height) - min_y) as f64) * scale_y).ceil() as i64;
-    let width = u32::try_from(right - left)
-        .map_err(|_| anyhow::anyhow!("scaled window width is invalid"))?;
-    let height = u32::try_from(bottom - top)
-        .map_err(|_| anyhow::anyhow!("scaled window height is invalid"))?;
-    let left = i32::try_from(left).map_err(|_| anyhow::anyhow!("scaled window x is invalid"))?;
-    let top = i32::try_from(top).map_err(|_| anyhow::anyhow!("scaled window y is invalid"))?;
-    Ok((left, top, width, height))
 }
 
 fn clip_capture_rect(
@@ -5845,34 +4973,6 @@ fn action_result(
     }
 }
 
-fn portal_action_error(
-    action: &str,
-    error: anyhow::Error,
-    received: Option<serde_json::Value>,
-) -> ActionOutput {
-    ActionOutput {
-        ok: false,
-        implemented: true,
-        action: action.to_string(),
-        message: format!(
-            "Remote desktop portal {action} may have started before it failed; input was not replayed through another backend: {error:#}"
-        ),
-        received,
-    }
-}
-
-fn portal_coordinate_error(action: &str, received: Option<serde_json::Value>) -> ActionOutput {
-    ActionOutput {
-        ok: false,
-        implemented: true,
-        action: action.to_string(),
-        message: format!(
-            "Remote desktop portal {action} was not sent because the coordinate could not be mapped safely to the complete shared desktop; input was not replayed through another backend."
-        ),
-        received,
-    }
-}
-
 fn action_result_with_focus(
     action: &str,
     result: std::result::Result<Vec<Output>, String>,
@@ -5880,24 +4980,6 @@ fn action_result_with_focus(
     focus: Option<WindowFocusResult>,
 ) -> ActionOutput {
     with_focus_context(action_result(action, result, received), focus)
-}
-
-fn successful_action_with_focus(
-    action: &str,
-    message: &str,
-    received: Option<serde_json::Value>,
-    focus: Option<WindowFocusResult>,
-) -> ActionOutput {
-    with_focus_context(
-        ActionOutput {
-            ok: true,
-            implemented: true,
-            action: action.to_string(),
-            message: message.to_string(),
-            received,
-        },
-        focus,
-    )
 }
 
 fn with_focus_context(mut output: ActionOutput, focus: Option<WindowFocusResult>) -> ActionOutput {
@@ -6023,7 +5105,7 @@ async fn window_list_output() -> ListWindowsOutput {
     match list_windows().await {
         Ok(windows) => {
             let backend = window_backend(windows.iter());
-            let note = registry::list_note(&backend);
+            let note = registry::LIST_NOTE;
             ListWindowsOutput {
                 backend,
                 windows,
@@ -6035,7 +5117,7 @@ async fn window_list_output() -> ListWindowsOutput {
         Err(error) => {
             let error = format!("{error:#}");
             ListWindowsOutput {
-                backend: GNOME_SHELL_INTROSPECT_BACKEND.to_string(),
+                backend: UNKNOWN_BACKEND.to_string(),
                 windows: Vec::new(),
                 permissions_hint: window_permission_hint(&error),
                 error: Some(error),
@@ -6050,7 +5132,7 @@ fn window_backend<'a>(windows: impl Iterator<Item = &'a WindowInfo>) -> String {
     windows
         .map(|window| window.backend.clone())
         .next()
-        .unwrap_or_else(|| GNOME_SHELL_INTROSPECT_BACKEND.to_string())
+        .unwrap_or_else(|| UNKNOWN_BACKEND.to_string())
 }
 
 fn absolute_mousemove_args(x: i32, y: i32) -> Vec<String> {
@@ -6061,61 +5143,6 @@ fn absolute_mousemove_args(x: i32, y: i32) -> Vec<String> {
         x.to_string(),
         y.to_string(),
     ]
-}
-
-fn xdotool_pointer_click_args(
-    x: i32,
-    y: i32,
-    count: u32,
-    button: Option<&str>,
-) -> Option<Vec<String>> {
-    let button = xdotool_pointer_button_code(button)?;
-    Some(vec![
-        "mousemove".to_string(),
-        "--".to_string(),
-        x.to_string(),
-        y.to_string(),
-        "click".to_string(),
-        "--repeat".to_string(),
-        count.to_string(),
-        button.to_string(),
-    ])
-}
-
-fn xdotool_pointer_button_code(button: Option<&str>) -> Option<&'static str> {
-    match button.unwrap_or("left").to_ascii_lowercase().as_str() {
-        "left" => Some("1"),
-        "middle" => Some("2"),
-        "right" => Some("3"),
-        _ => None,
-    }
-}
-
-#[derive(Debug)]
-struct PointerCommandResult {
-    outputs: Vec<Output>,
-    backend: KeyboardCommandBackend,
-}
-
-async fn run_xdotool_pointer_or_fallback<F, Fut>(
-    program: &Path,
-    args: &[String],
-    fallback: F,
-) -> std::result::Result<PointerCommandResult, String>
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = std::result::Result<Vec<Output>, String>>,
-{
-    match run_xdotool(program, args).await {
-        XdotoolAttempt::Unavailable => fallback().await.map(|outputs| PointerCommandResult {
-            outputs,
-            backend: KeyboardCommandBackend::Ydotool,
-        }),
-        XdotoolAttempt::Finished(result) => result.map(|output| PointerCommandResult {
-            outputs: vec![output],
-            backend: KeyboardCommandBackend::Xdotool,
-        }),
-    }
 }
 
 /// Map a semantic scroll direction to the `(dx, dy)` pair for
@@ -6269,214 +5296,22 @@ fn ydotool_type_timeout(text: &str) -> Duration {
     Duration::from_secs(INPUT_COMMAND_TIMEOUT.as_secs().saturating_add(text_seconds))
 }
 
-const EVDEV_KEY_LEFTCTRL: i32 = 29;
-const EVDEV_KEY_V: i32 = 47;
-const KDE_CLIPBOARD_RESTORE_MIN_DELAY_MS: u64 = 1_500;
-const KDE_CLIPBOARD_RESTORE_MAX_DELAY_MS: u64 = 5_000;
-const KDE_CLIPBOARD_RESTORE_CHARS_PER_SECOND: u64 = 250;
-
-fn kde_clipboard_restore_delay(text: &str) -> Duration {
-    let text_delay_ms = (text.chars().count() as u64)
-        .saturating_mul(1_000)
-        .div_ceil(KDE_CLIPBOARD_RESTORE_CHARS_PER_SECOND);
-    Duration::from_millis(text_delay_ms.clamp(
-        KDE_CLIPBOARD_RESTORE_MIN_DELAY_MS,
-        KDE_CLIPBOARD_RESTORE_MAX_DELAY_MS,
-    ))
-}
-
-#[derive(Debug)]
-struct KdeClipboardPasteError {
-    message: String,
-    can_fallback_to_ydotool: bool,
-    clear_portal_keyboard_session: bool,
-}
-
-impl KdeClipboardPasteError {
-    fn before_text_input(message: String) -> Self {
-        Self {
-            message,
-            can_fallback_to_ydotool: true,
-            clear_portal_keyboard_session: false,
-        }
-    }
-
-    fn after_portal_input(message: String) -> Self {
-        Self {
-            message,
-            can_fallback_to_ydotool: false,
-            clear_portal_keyboard_session: true,
-        }
-    }
-}
-
-async fn run_kde_clipboard_paste_text(
-    session: &PortalKeyboardSession,
-    text: &str,
-) -> std::result::Result<String, KdeClipboardPasteError> {
-    let previous = kde_clipboard_contents()
-        .await
-        .map_err(KdeClipboardPasteError::before_text_input)?;
-    kde_set_clipboard_contents(text)
-        .await
-        .map_err(KdeClipboardPasteError::before_text_input)?;
-
-    let paste_result = press_keycode_chord(session, &[EVDEV_KEY_LEFTCTRL], EVDEV_KEY_V)
-        .await
-        .map_err(|error| format!("{error:#}"));
-
-    sleep(kde_clipboard_restore_delay(text)).await;
-    let restore_result = kde_set_clipboard_contents(&previous).await;
-
-    match (paste_result, restore_result) {
-        (Ok(_), Ok(_)) => Ok("Action pasted through KDE clipboard integration.".to_string()),
-        (Err(error), Ok(_)) => Err(KdeClipboardPasteError::after_portal_input(error)),
-        (Ok(_), Err(restore_error)) => Ok(format!(
-            "Action pasted through KDE clipboard integration. Warning: previous KDE clipboard contents could not be restored: {restore_error}"
-        )),
-        (Err(error), Err(restore_error)) => Err(KdeClipboardPasteError::after_portal_input(
-            format!("{error}; previous KDE clipboard contents could not be restored: {restore_error}"),
-        )),
-    }
-}
-
-async fn kde_clipboard_contents() -> std::result::Result<String, String> {
-    let connection = kde_clipboard_connection().await?;
-    let proxy = kde_clipboard_proxy(&connection).await?;
-    let output: String = kde_clipboard_dbus_operation(
-        "getClipboardContents",
-        proxy.call("getClipboardContents", &()),
-    )
-    .await?;
-    Ok(output)
-}
-
-async fn kde_set_clipboard_contents(text: &str) -> std::result::Result<(), String> {
-    let connection = kde_clipboard_connection().await?;
-    let proxy = kde_clipboard_proxy(&connection).await?;
-    let _: () = kde_clipboard_dbus_operation(
-        "setClipboardContents",
-        proxy.call("setClipboardContents", &(text)),
-    )
-    .await?;
-    Ok(())
-}
-
-async fn kde_clipboard_connection() -> std::result::Result<ZbusConnection, String> {
-    ZbusConnection::session()
-        .await
-        .map_err(|error| format!("failed to connect to session bus for KDE clipboard: {error}"))
-}
-
-async fn kde_clipboard_proxy(
-    connection: &ZbusConnection,
-) -> std::result::Result<ZbusProxy<'_>, String> {
-    kde_clipboard_dbus_operation(
-        "proxy creation",
-        ZbusProxy::new(
-            connection,
-            KDE_KLIPPER_SERVICE,
-            KDE_KLIPPER_PATH,
-            KDE_KLIPPER_INTERFACE,
-        ),
-    )
-    .await
-}
-
-async fn kde_clipboard_dbus_operation<T, F>(
-    operation: &'static str,
-    future: F,
-) -> std::result::Result<T, String>
-where
-    F: Future<Output = zbus::Result<T>>,
-{
-    kde_clipboard_dbus_operation_with_timeout(operation, future, KDE_CLIPBOARD_DBUS_TIMEOUT).await
-}
-
-async fn kde_clipboard_dbus_operation_with_timeout<T, F>(
-    operation: &'static str,
-    future: F,
-    timeout_duration: Duration,
-) -> std::result::Result<T, String>
-where
-    F: Future<Output = zbus::Result<T>>,
-{
-    timeout(timeout_duration, future)
-        .await
-        .map_err(|_| format!("KDE clipboard {operation} timed out"))?
-        .map_err(|error| format!("KDE clipboard {operation} failed: {error}"))
-}
-
 fn ydotool_output_error(output: Output) -> String {
     command_output_error("ydotool", output)
 }
 
-/// X11 keyboard input runs through `xdotool` (XTEST) instead of ydotool.
-///
-/// ydotool injects raw evdev keycodes into a virtual uinput device. Under X11
-/// the server re-interprets those scancodes through the active XKB layout, so
-/// named keys and chords land as unrelated glyphs and literal text can mangle
-/// symbols/digits (`_` → `%`, `1` → `+`). XTEST resolves keysyms against the
-/// live layout, which is what X11 clients actually expect. See issue #58.
+/// Which keyboard lane produced a result: `wtype` speaks the Wayland
+/// virtual-keyboard protocol and is layout-safe for literal text, while
+/// ydotool injects raw evdev keycodes and is the fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyboardCommandBackend {
     Wtype,
-    Xdotool,
     Ydotool,
 }
 
 struct KeyboardCommandResult {
     output: Output,
     backend: KeyboardCommandBackend,
-}
-
-enum XdotoolAttempt {
-    Unavailable,
-    Finished(std::result::Result<Output, String>),
-}
-
-async fn run_xdotool(program: &Path, args: &[String]) -> XdotoolAttempt {
-    let mut command = TokioCommand::new(program);
-    command.args(args);
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-    command.kill_on_drop(true);
-    command.process_group(0);
-
-    match command.spawn() {
-        Ok(child) => XdotoolAttempt::Finished(
-            match crate::command_runner::output_child(child, "run xdotool", INPUT_COMMAND_TIMEOUT)
-                .await
-                .map_err(|error| format!("{error:#}"))
-            {
-                Ok(output) if output.status.success() => Ok(output),
-                Ok(output) => Err(command_output_error("xdotool", output)),
-                Err(error) => Err(error),
-            },
-        ),
-        Err(_) => XdotoolAttempt::Unavailable,
-    }
-}
-
-async fn run_xdotool_or_fallback<F, Fut>(
-    program: &Path,
-    args: &[String],
-    fallback: F,
-) -> std::result::Result<KeyboardCommandResult, String>
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = std::result::Result<Output, String>>,
-{
-    match run_xdotool(program, args).await {
-        XdotoolAttempt::Unavailable => fallback().await.map(|output| KeyboardCommandResult {
-            output,
-            backend: KeyboardCommandBackend::Ydotool,
-        }),
-        XdotoolAttempt::Finished(result) => result.map(|output| KeyboardCommandResult {
-            output,
-            backend: KeyboardCommandBackend::Xdotool,
-        }),
-    }
 }
 
 async fn run_wtype_type_text_or_fallback<F, Fut>(
@@ -6521,13 +5356,6 @@ where
     })
 }
 
-/// True when `xdotool` can drive this session: an X11 session with `DISPLAY`
-/// set and the binary present. `COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD=1`
-/// opts out; `COMPUTER_USE_LINUX_FORCE_XDOTOOL_KEYBOARD=1` forces it on.
-fn xdotool_available() -> bool {
-    which_in_path("xdotool")
-}
-
 fn wtype_available() -> bool {
     which_in_path("wtype")
 }
@@ -6541,17 +5369,6 @@ fn prefer_wtype_keyboard(
     !force_ydotool && is_wayland && compatible_desktop && available
 }
 
-fn xdotool_type_args(text: &str) -> Vec<String> {
-    vec![
-        "type".to_string(),
-        "--clearmodifiers".to_string(),
-        "--delay".to_string(),
-        "0".to_string(),
-        "--".to_string(),
-        text.to_string(),
-    ]
-}
-
 fn which_in_path(binary: &str) -> bool {
     let Ok(path) = env::var("PATH") else {
         return false;
@@ -6562,93 +5379,6 @@ fn which_in_path(binary: &str) -> bool {
             .map(|meta| meta.is_file())
             .unwrap_or(false)
     })
-}
-
-/// Map our key grammar onto an `xdotool key` spec such as `ctrl+a`, `Return`,
-/// or `shift+F5`. Returns `None` for keys the grammar does not accept, so the
-/// caller keeps its existing "never silently dropped" error.
-fn xdotool_key_spec(key: &str) -> Option<String> {
-    let parts = key
-        .split('+')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    let (key_part, modifier_parts) = parts.split_last()?;
-
-    // Validate through the same evdev grammar so both backends accept exactly
-    // the same input set.
-    key_chord(key)?;
-
-    let mut spec = Vec::new();
-    for part in modifier_parts {
-        spec.push(xdotool_modifier_name(part)?.to_string());
-    }
-
-    if modifier_parts.is_empty() {
-        if let Some(bare) = xdotool_modifier_keysym(key_part) {
-            return Some(bare.to_string());
-        }
-    }
-    spec.push(xdotool_keysym_name(key_part)?);
-    Some(spec.join("+"))
-}
-
-fn xdotool_modifier_name(key: &str) -> Option<&'static str> {
-    match normalize_key(key).as_str() {
-        "ctrl" | "control" => Some("ctrl"),
-        "alt" | "option" => Some("alt"),
-        "shift" => Some("shift"),
-        "meta" | "super" | "cmd" | "command" => Some("super"),
-        _ => None,
-    }
-}
-
-/// Standalone keysym for a bare modifier press (`press_key "Super"`).
-fn xdotool_modifier_keysym(key: &str) -> Option<&'static str> {
-    match normalize_key(key).as_str() {
-        "ctrl" | "control" => Some("ctrl"),
-        "alt" | "option" => Some("alt"),
-        "shift" => Some("shift"),
-        "meta" | "super" | "cmd" | "command" => Some("super"),
-        _ => None,
-    }
-}
-
-fn xdotool_keysym_name(key: &str) -> Option<String> {
-    let normalized = normalize_key(key);
-    let named = match normalized.as_str() {
-        "enter" | "return" => "Return",
-        "escape" | "esc" => "Escape",
-        "tab" => "Tab",
-        "backspace" => "BackSpace",
-        "delete" | "del" => "Delete",
-        "space" => "space",
-        "home" => "Home",
-        "end" => "End",
-        "pageup" | "page_up" => "Page_Up",
-        "pagedown" | "page_down" => "Page_Down",
-        "arrowleft" | "left" => "Left",
-        "arrowright" | "right" => "Right",
-        "arrowup" | "up" => "Up",
-        "arrowdown" | "down" => "Down",
-        "f1" => "F1",
-        "f2" => "F2",
-        "f3" => "F3",
-        "f4" => "F4",
-        "f5" => "F5",
-        "f6" => "F6",
-        "f7" => "F7",
-        "f8" => "F8",
-        "f9" => "F9",
-        "f10" => "F10",
-        "f11" => "F11",
-        "f12" => "F12",
-        value if value.len() == 1 && value.as_bytes()[0].is_ascii_alphanumeric() => {
-            return Some(value.to_string());
-        }
-        _ => return None,
-    };
-    Some(named.to_string())
 }
 
 fn command_output_error(command: &str, output: Output) -> String {
@@ -6669,28 +5399,6 @@ fn ydotool_socket() -> Option<String> {
 
     connectable_ydotool_socket_from(fallback_ydotool_socket_candidates())
         .map(|path| path.display().to_string())
-}
-
-async fn ydotool_backend_available() -> bool {
-    ydotool_backend_available_from(
-        ydotool_socket_connectable(),
-        ydotool::ensure_supported_async().await.is_ok(),
-    )
-}
-
-fn ydotool_socket_connectable() -> bool {
-    if let Some(socket) = explicit_ydotool_socket() {
-        return ydotool_socket_connects(&PathBuf::from(socket));
-    }
-    connectable_ydotool_socket_from(fallback_ydotool_socket_candidates()).is_some()
-}
-
-fn ydotool_backend_available_from(socket_available: bool, cli_supported: bool) -> bool {
-    socket_available && cli_supported
-}
-
-fn should_prefer_portal_backend_by_default(is_wayland: bool, ydotool_available: bool) -> bool {
-    is_wayland && !ydotool_available
 }
 
 fn explicit_ydotool_socket() -> Option<String> {
@@ -6980,7 +5688,7 @@ fn looks_like_desktop_app(name: &str, command: &str) -> bool {
 mod tests {
     use super::*;
     use crate::atspi_tree::{AccessibilityAction, Bounds};
-    use crate::windows::{WindowBounds, GNOME_SHELL_EXTENSION_BACKEND};
+    use crate::windowing::{WindowBounds, HYPRLAND_BACKEND};
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -7141,97 +5849,6 @@ mod tests {
     }
 
     #[test]
-    fn gnome_window_crop_scales_logical_bounds_to_capture_pixels() {
-        let bounds = WindowBounds {
-            x: Some(6),
-            y: Some(36),
-            width: 1357,
-            height: 1144,
-        };
-        let monitors = [(0, 0, 1920, 1200)];
-
-        assert_eq!(
-            logical_window_crop_rect(&bounds, &monitors, 2560, 1600).unwrap(),
-            (8, 48, 1810, 1526)
-        );
-    }
-
-    #[test]
-    fn portal_points_map_capture_pixels_back_to_logical_window_space() {
-        let scaled = WindowCoordinateMap {
-            capture_rect: (8, 48, 1810, 1526),
-            full_capture_rect: (8, 48, 1810, 1526),
-            portal_rect: Some((6, 36, 1357, 1144)),
-        };
-        assert_eq!(scaled.portal_point(913, 811), Some((684, 608)));
-
-        let clipped = WindowCoordinateMap {
-            capture_rect: (0, 0, 50, 60),
-            full_capture_rect: (-50, -40, 100, 100),
-            portal_rect: Some((-50, -40, 100, 100)),
-        };
-        assert_eq!(clipped.portal_point(0, 0), Some((0, 0)));
-    }
-
-    #[test]
-    fn scaled_kwin_bounds_keep_capture_and_portal_spaces_distinct() {
-        let bounds = WindowBounds {
-            x: Some(1000),
-            y: Some(100),
-            width: 800,
-            height: 600,
-        };
-        let logical_rect = window_crop_rect(&bounds).unwrap();
-        let full_capture_rect =
-            logical_window_crop_rect(&bounds, &[(0, 0, 1920, 1080)], 3840, 2160).unwrap();
-        let mapping = WindowCoordinateMap {
-            capture_rect: full_capture_rect,
-            full_capture_rect,
-            portal_rect: Some(logical_rect),
-        };
-
-        assert_eq!(mapping.capture_rect, (2000, 200, 1600, 1200));
-        assert_eq!(mapping.portal_point(2400, 500), Some((1200, 250)));
-    }
-
-    #[test]
-    fn kwin_mapping_uses_the_workspace_geometry_origin() {
-        let bounds = WindowBounds {
-            x: Some(1100),
-            y: Some(50),
-            width: 800,
-            height: 600,
-        };
-        let logical_rect = window_crop_rect(&bounds).unwrap();
-        let full_capture_rect =
-            logical_window_crop_rect(&bounds, &[(100, -50, 1920, 1080)], 3840, 2160).unwrap();
-        let mapping = WindowCoordinateMap {
-            capture_rect: full_capture_rect,
-            full_capture_rect,
-            portal_rect: Some(logical_rect),
-        };
-
-        assert_eq!(mapping.capture_rect, (2000, 200, 1600, 1200));
-        assert_eq!(mapping.portal_point(2400, 500), Some((1300, 200)));
-    }
-
-    #[test]
-    fn gnome_window_crop_accounts_for_negative_monitor_origins() {
-        let bounds = WindowBounds {
-            x: Some(-900),
-            y: Some(100),
-            width: 400,
-            height: 300,
-        };
-        let monitors = [(-1000, 0, 1000, 800), (0, 0, 1200, 800)];
-
-        assert_eq!(
-            logical_window_crop_rect(&bounds, &monitors, 2200, 800).unwrap(),
-            (100, 100, 400, 300)
-        );
-    }
-
-    #[test]
     fn readonly_targeted_screenshot_requires_focused_visible_window() {
         let mut window = window_info(1, Some("Target"), None, None, None);
         assert!(ensure_readonly_screenshot_target_is_visible(&window).is_err());
@@ -7239,43 +5856,6 @@ mod tests {
         assert!(ensure_readonly_screenshot_target_is_visible(&window).is_ok());
         window.hidden = true;
         assert!(ensure_readonly_screenshot_target_is_visible(&window).is_err());
-    }
-
-    #[test]
-    fn wayland_display_is_enough_to_select_portal_fallback() {
-        assert!(session_is_wayland(None, Some("wayland-1")));
-        assert!(session_is_wayland(Some("  "), Some("wayland-1")));
-        assert!(session_is_wayland(Some("wayland"), None));
-        assert!(!session_is_wayland(Some("x11"), None));
-        assert!(!session_is_wayland(None, Some("  ")));
-    }
-
-    #[test]
-    fn incompatible_ydotool_socket_does_not_suppress_portal_fallback() {
-        let incompatible_ydotool = ydotool_backend_available_from(true, false);
-        let compatible_ydotool = ydotool_backend_available_from(true, true);
-
-        assert!(should_prefer_portal_backend_by_default(
-            true,
-            incompatible_ydotool
-        ));
-        assert!(!should_prefer_portal_backend_by_default(
-            true,
-            compatible_ydotool
-        ));
-        assert!(!should_prefer_portal_backend_by_default(
-            false,
-            incompatible_ydotool
-        ));
-    }
-
-    #[test]
-    fn xdotool_keyboard_override_policy_matches_documented_precedence() {
-        assert!(prefer_xdotool_keyboard(false, true, true, true, true));
-        assert!(!prefer_xdotool_keyboard(true, true, true, true, true));
-        assert!(!prefer_xdotool_keyboard(false, true, true, false, true));
-        assert!(!prefer_xdotool_keyboard(false, false, true, true, true));
-        assert!(prefer_xdotool_keyboard(false, false, false, true, true));
     }
 
     #[test]
@@ -7338,7 +5918,7 @@ mod tests {
             focused: false,
             hidden: false,
             client_type: Some("wayland".to_string()),
-            backend: GNOME_SHELL_EXTENSION_BACKEND.to_string(),
+            backend: HYPRLAND_BACKEND.to_string(),
             terminal: None,
         }
     }
@@ -7629,42 +6209,6 @@ mod tests {
         assert_eq!(compacted.len(), 3);
         assert_eq!(compacted[2].role, "page tab");
         assert_eq!(compacted[2].name.as_deref(), Some("Hidden"));
-    }
-
-    #[test]
-    fn kde_clipboard_restore_delay_uses_minimum_for_short_text() {
-        assert_eq!(
-            kde_clipboard_restore_delay("short"),
-            Duration::from_millis(KDE_CLIPBOARD_RESTORE_MIN_DELAY_MS)
-        );
-    }
-
-    #[test]
-    fn kde_clipboard_restore_delay_scales_and_caps_long_text() {
-        let scaled_text = "x".repeat(1_000);
-        assert_eq!(
-            kde_clipboard_restore_delay(&scaled_text),
-            Duration::from_millis(4_000)
-        );
-
-        let capped_text = "x".repeat(10_000);
-        assert_eq!(
-            kde_clipboard_restore_delay(&capped_text),
-            Duration::from_millis(KDE_CLIPBOARD_RESTORE_MAX_DELAY_MS)
-        );
-    }
-
-    #[tokio::test]
-    async fn kde_clipboard_dbus_operation_times_out_when_pending() {
-        let error = kde_clipboard_dbus_operation_with_timeout(
-            "proxy creation",
-            std::future::pending::<zbus::Result<()>>(),
-            Duration::from_millis(1),
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(error, "KDE clipboard proxy creation timed out");
     }
 
     #[test]
@@ -8815,113 +7359,6 @@ mod tests {
     }
 
     #[test]
-    fn native_x11_pointer_policy_requires_explicit_x11_without_wayland_display() {
-        assert!(native_x11_xdotool_pointer_session(Some("x11"), None));
-        assert!(!native_x11_xdotool_pointer_session(
-            Some("wayland"),
-            Some("wayland-0")
-        ));
-        assert!(!native_x11_xdotool_pointer_session(
-            Some("x11"),
-            Some("wayland-0")
-        ));
-    }
-
-    #[test]
-    fn xdotool_pointer_command_is_single_no_sync_move_and_click() {
-        assert_eq!(
-            xdotool_pointer_click_args(1550, 930, 3, Some("right")),
-            Some(vec![
-                "mousemove".to_string(),
-                "--".to_string(),
-                "1550".to_string(),
-                "930".to_string(),
-                "click".to_string(),
-                "--repeat".to_string(),
-                "3".to_string(),
-                "3".to_string(),
-            ])
-        );
-    }
-
-    #[test]
-    fn xdotool_pointer_policy_requires_all_pure_gating_conditions() {
-        let eligible = (false, Some("x11"), true, None, true);
-        assert!(prefer_xdotool_pointer(
-            eligible.0, eligible.1, eligible.2, eligible.3, eligible.4
-        ));
-        assert!(!prefer_xdotool_pointer(true, Some("x11"), true, None, true));
-        assert!(!prefer_xdotool_pointer(
-            false,
-            Some("wayland"),
-            true,
-            None,
-            true
-        ));
-        assert!(!prefer_xdotool_pointer(
-            false,
-            None,
-            true,
-            Some("wayland-0"),
-            true
-        ));
-        assert!(!prefer_xdotool_pointer(
-            false,
-            Some("x11"),
-            false,
-            None,
-            true
-        ));
-        assert!(!prefer_xdotool_pointer(
-            false,
-            Some("x11"),
-            true,
-            None,
-            false
-        ));
-    }
-
-    #[test]
-    fn xdotool_pointer_supports_only_standard_buttons() {
-        assert!(xdotool_pointer_click_args(10, 20, 1, None).is_some());
-        assert!(xdotool_pointer_click_args(10, 20, 1, Some("middle")).is_some());
-        assert!(xdotool_pointer_click_args(10, 20, 1, Some("right")).is_some());
-    }
-
-    #[test]
-    fn extended_pointer_buttons_do_not_construct_xdotool_commands() {
-        for button in ["side", "extra", "forward", "back"] {
-            assert_eq!(xdotool_pointer_click_args(10, 20, 1, Some(button)), None);
-        }
-    }
-
-    #[tokio::test]
-    async fn pointer_xdotool_spawn_failure_uses_ydotool_fallback() {
-        let result = run_xdotool_pointer_or_fallback(
-            Path::new("/definitely/missing/xdotool"),
-            &[],
-            || async { Ok::<_, String>(Vec::new()) },
-        )
-        .await
-        .expect("spawn failure should use fallback");
-
-        assert_eq!(result.backend, KeyboardCommandBackend::Ydotool);
-    }
-
-    #[tokio::test]
-    async fn pointer_xdotool_nonzero_exit_does_not_use_ydotool_fallback() {
-        let result = run_xdotool_pointer_or_fallback(
-            Path::new("/bin/sh"),
-            &["-c".to_string(), "exit 9".to_string()],
-            || async { Err::<Vec<Output>, _>("fallback called".to_string()) },
-        )
-        .await;
-
-        let error = result.expect_err("launched nonzero xdotool must be terminal");
-        assert!(!error.contains("fallback called"));
-    }
-
-    #[test]
     fn wheel_mousemove_uses_coordinate_separator_for_negative_values() {
         assert_eq!(
             wheel_mousemove_args(0, -3),
@@ -8987,111 +7424,6 @@ mod tests {
             key_sequence("Super"),
             Some(vec!["125:1".to_string(), "125:0".to_string()])
         );
-    }
-
-    #[test]
-    fn xdotool_key_spec_maps_named_keys_to_x11_keysyms() {
-        assert_eq!(xdotool_key_spec("Return"), Some("Return".to_string()));
-        assert_eq!(xdotool_key_spec("enter"), Some("Return".to_string()));
-        assert_eq!(xdotool_key_spec("Escape"), Some("Escape".to_string()));
-        assert_eq!(xdotool_key_spec("backspace"), Some("BackSpace".to_string()));
-        assert_eq!(xdotool_key_spec("PageUp"), Some("Page_Up".to_string()));
-        assert_eq!(xdotool_key_spec("ArrowLeft"), Some("Left".to_string()));
-        assert_eq!(xdotool_key_spec("f5"), Some("F5".to_string()));
-        assert_eq!(xdotool_key_spec("space"), Some("space".to_string()));
-    }
-
-    #[test]
-    fn xdotool_key_spec_maps_chords_with_modifier_prefixes() {
-        assert_eq!(xdotool_key_spec("ctrl+a"), Some("ctrl+a".to_string()));
-        assert_eq!(xdotool_key_spec("Ctrl+S"), Some("ctrl+s".to_string()));
-        assert_eq!(
-            xdotool_key_spec("Ctrl+Shift+P"),
-            Some("ctrl+shift+p".to_string())
-        );
-        assert_eq!(
-            xdotool_key_spec("Meta+Return"),
-            Some("super+Return".to_string())
-        );
-        assert_eq!(xdotool_key_spec("Alt+F4"), Some("alt+F4".to_string()));
-    }
-
-    #[test]
-    fn xdotool_key_spec_maps_bare_modifier_to_single_keysym() {
-        assert_eq!(xdotool_key_spec("Super"), Some("super".to_string()));
-        assert_eq!(xdotool_key_spec("ctrl"), Some("ctrl".to_string()));
-    }
-
-    #[test]
-    fn xdotool_type_disables_per_character_delay_for_long_input() {
-        let text = "x".repeat(10_000);
-        let args = xdotool_type_args(&text);
-
-        assert_eq!(
-            &args[..5],
-            ["type", "--clearmodifiers", "--delay", "0", "--"]
-        );
-        assert_eq!(args[5], text);
-    }
-
-    #[tokio::test]
-    async fn launched_xdotool_failure_does_not_replay_through_ydotool() {
-        let dir = std::env::temp_dir().join(format!(
-            "computer-use-linux-xdotool-fallback-{}-{:?}",
-            std::process::id(),
-            std::time::SystemTime::now()
-        ));
-        std::fs::create_dir_all(&dir).expect("create command test directory");
-        let ydotool = dir.join("ydotool");
-        let xdotool_marker = dir.join("xdotool-ran");
-        let ydotool_marker = dir.join("ydotool-ran");
-        std::fs::write(
-            &ydotool,
-            format!("#!/bin/sh\ntouch '{}'\n", ydotool_marker.display()),
-        )
-        .expect("write fake ydotool");
-        std::fs::set_permissions(&ydotool, std::fs::Permissions::from_mode(0o700))
-            .expect("make fake ydotool executable");
-        let xdotool_args = vec![
-            "-c".to_string(),
-            format!("touch '{}'; exit 9", xdotool_marker.display()),
-        ];
-
-        let result = run_xdotool_or_fallback(Path::new("/bin/sh"), &xdotool_args, || async {
-            TokioCommand::new(&ydotool)
-                .output()
-                .await
-                .map_err(|error| error.to_string())
-        })
-        .await;
-
-        assert!(result.is_err());
-        assert!(xdotool_marker.exists(), "fake xdotool did not execute");
-        assert!(
-            !ydotool_marker.exists(),
-            "ydotool replayed input after xdotool started"
-        );
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[tokio::test]
-    async fn unavailable_xdotool_uses_ydotool_fallback() {
-        let result = run_xdotool_or_fallback(
-            Path::new("/definitely/missing/xdotool"),
-            &xdotool_type_args("text"),
-            || async {
-                TokioCommand::new("sh")
-                    .args(["-c", "exit 0"])
-                    .output()
-                    .await
-                    .map_err(|error| error.to_string())
-            },
-        )
-        .await
-        .expect("spawn failure should use fallback");
-
-        assert_eq!(result.backend, KeyboardCommandBackend::Ydotool);
-        assert!(result.output.status.success());
     }
 
     #[tokio::test]
@@ -9175,56 +7507,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelling_xdotool_wait_kills_the_child() {
-        let dir = std::env::temp_dir().join(format!(
-            "computer-use-linux-xdotool-cancel-{}-{:?}",
-            std::process::id(),
-            std::time::SystemTime::now()
-        ));
-        std::fs::create_dir_all(&dir).expect("create command test directory");
-        let xdotool = dir.join("xdotool");
-        let pid_path = dir.join("pid");
-        std::fs::write(
-            &xdotool,
-            format!(
-                "#!/bin/sh\nprintf '%s' $$ > '{}'\nexec sleep 60\n",
-                pid_path.display()
-            ),
-        )
-        .expect("write fake xdotool");
-        std::fs::set_permissions(&xdotool, std::fs::Permissions::from_mode(0o700))
-            .expect("make fake xdotool executable");
-
-        let task = tokio::spawn(async move { run_xdotool(&xdotool, &[]).await });
-        let mut pid = None;
-        for _ in 0..200 {
-            if let Ok(value) = std::fs::read_to_string(&pid_path) {
-                pid = value.parse::<u32>().ok();
-                if pid.is_some() {
-                    break;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let pid = pid.expect("fake xdotool did not record its pid");
-        task.abort();
-        let _ = task.await;
-
-        for _ in 0..50 {
-            if !Path::new(&format!("/proc/{pid}")).exists() {
-                let _ = std::fs::remove_dir_all(dir);
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        unsafe {
-            libc::kill(pid as i32, libc::SIGKILL);
-        }
-        let _ = std::fs::remove_dir_all(dir);
-        panic!("cancelled xdotool child {pid} was not killed");
-    }
-
-    #[tokio::test]
     async fn cancelling_between_press_and_release_keeps_input_locked() {
         let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
         let guard = std::sync::Arc::clone(&lock).lock_owned().await;
@@ -9265,19 +7547,6 @@ mod tests {
         .expect("input lock remained held after the operation finished");
     }
 
-    /// The xdotool path must accept exactly the keys the evdev grammar accepts,
-    /// so switching backends can never silently widen or narrow the surface.
-    #[test]
-    fn xdotool_key_spec_rejects_everything_key_chord_rejects() {
-        for key in ["NotAKey", "", "ctrl+", "ctrl+NotAKey", "f13", "hyper+a"] {
-            assert_eq!(
-                xdotool_key_spec(key).is_some(),
-                key_chord(key).is_some(),
-                "backend grammars diverged for {key:?}"
-            );
-        }
-    }
-
     #[test]
     fn key_sequence_keeps_shortcuts_and_navigation_on_raw_events() {
         assert_eq!(
@@ -9313,6 +7582,7 @@ mod tests {
 
     #[tokio::test]
     async fn command_wait_drains_output_before_exit() {
+        use std::process::Stdio;
         let mut command = tokio::process::Command::new("sh");
         command.args(["-c", "yes noisy | head -c 200000 >&2; exit 7"]);
         command.stdout(Stdio::piped());
