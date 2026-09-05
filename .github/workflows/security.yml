@@ -1,0 +1,58 @@
+name: Dependency security
+
+# The dependency tree changes without the repository changing: an advisory
+# published today is about code that was vetted yesterday. CI answers "is this
+# change sound"; this answers "is what already shipped still sound", which is a
+# question only the calendar asks.
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  advisory-database:
+    name: cargo deny, on the calendar
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Filing the issue below, and nothing else.
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/rust
+        with:
+          tools: cargo-deny
+
+      # The same command the lint job runs. What this job adds is not the
+      # check, it is the day.
+      - name: Enforce dependency policy
+        run: cargo deny --locked check
+
+      # A scheduled run has no pull request to turn red and nobody watching the
+      # Actions tab at 06:00, so the day this finds something looks exactly
+      # like the day it found nothing. An issue is the difference.
+      #
+      # One open issue at a time: the advisory database does not need a new one
+      # every morning until the first is dealt with.
+      - name: Say so where somebody will see it
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          existing="$(gh issue list --label security-advisory --state open --json number --jq '.[0].number')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "Still failing: $RUN_URL"
+            exit 0
+          fi
+          gh label create security-advisory --color B60205 \
+            --description "A scheduled dependency security run failed" --force
+          gh issue create --label security-advisory \
+            --title "Dependency security run failed" \
+            --body "\`cargo deny check\` failed on the scheduled run, or the run could not start. $RUN_URL"
