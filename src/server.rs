@@ -1873,7 +1873,7 @@ impl ComputerUseLinux {
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
     version = "0.6.0",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. This server drives one desktop: Hyprland on Wayland. Windows come from hyprctl, the accessibility tree from AT-SPI, screenshots from the XDG Screenshot portal, and every input event from uinput -- an absolute pointer device for click, scroll and drag, wtype for literal text, and ydotool for keys and chords. There is no RemoteDesktop portal on Hyprland and this build does not look for one. Use list_windows/focused_window before targeted keyboard input. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. A window-targeted screenshot raises the window first; with raise_window=false the caption lists occluded_by so overlapping pixels are not mistaken for the target's own. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action and set_value can also use semantic role/name/text/states selectors when the target is unique. A plain left click on an element that exposes an AT-SPI click action invokes that action and never moves the pointer; the message says which path ran. click, scroll and drag all accept the same window target and relative coordinates, and drag additionally accepts start_element_index/end_element_index; each reports the desktop point every end resolved to. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After click, drag, perform_action, press_key and type_text, results append focused-element feedback from AT-SPI (role, name, editable, states) and warn when no editable element holds focus after typing -- treat that warning as the input not landing; element clicks and actions also report the element's states before -> after when they changed. When an element operation answers that the cached accessibility tree is stale, call get_app_state again before retrying. wait_for polls until an element selector, a window title substring, or a focused window holds and returns the element with its index in a freshly cached tree. pointer_position reports the pointer's desktop coordinates. Hyprland cannot give a tiled window an exact geometry, so move_window and resize_window refuse one without dispatching anything; call set_window_floating with floating=true, retry, then set_window_floating with floating=false to restore the layout. The first input action of this process takes a machine-wide session lock; another server process gets ok=false naming the holder's pid. When COMPUTER_USE_LINUX_ALLOWED_APPS is set, input tools refuse windows matching none of its app_id/wm_class/title patterns. Screenshot, click and input results warn when the target window or coordinate is partially or fully off-screen. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
+    instructions = "Begin every turn that uses Computer Use by calling get_app_state. This server drives one desktop: Hyprland on Wayland. Windows come from hyprctl, the accessibility tree from AT-SPI, screenshots from the XDG Screenshot portal, and every input event from uinput -- an absolute pointer device for click, scroll and drag, wtype for literal text, and ydotool for keys and chords. There is no RemoteDesktop portal on Hyprland and this build does not look for one. Use list_windows/focused_window before targeted keyboard input. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. A window-targeted screenshot raises the window first; with raise_window=false the caption lists occluded_by so overlapping pixels are not mistaken for the target's own. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action and set_value can also use semantic role/name/text/states selectors when the target is unique. A plain left click on an element that exposes an AT-SPI click action invokes that action and never moves the pointer; the message says which path ran. Every window-targeted tool takes the same nine selectors -- window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, terminal_cwd -- and they refuse targeted input if focus cannot be verified. click, scroll and drag also accept relative coordinates, and drag accepts start_element_index/end_element_index; each reports the desktop point every end resolved to. On wait_for, window_title is a predicate, not a selector: the substring the target window's title must contain. After click, drag, perform_action, press_key and type_text, results append focused-element feedback from AT-SPI (role, name, editable, states) and warn when no editable element holds focus after typing -- treat that warning as the input not landing; element clicks and actions also report the element's states before -> after when they changed. When an element operation answers that the cached accessibility tree is stale, call get_app_state again before retrying. wait_for polls until an element selector, a window title substring, or a focused window holds and returns the element with its index in a freshly cached tree. pointer_position reports the pointer's desktop coordinates. Hyprland cannot give a tiled window an exact geometry, so move_window and resize_window refuse one without dispatching anything; call set_window_floating with floating=true, retry, then set_window_floating with floating=false to restore the layout. The first input action of this process takes a machine-wide session lock; another server process gets ok=false naming the holder's pid. When COMPUTER_USE_LINUX_ALLOWED_APPS is set, input tools refuse windows matching none of its app_id/wm_class/title patterns. Screenshot, click and input results warn when the target window or coordinate is partially or fully off-screen. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
 )]
 impl ServerHandler for ComputerUseLinux {}
 
@@ -2202,6 +2202,17 @@ struct ActivateWindowParams {
 }
 
 impl ActivateWindowParams {
+    /// The same target without consuming the params.
+    fn to_target(&self) -> WindowTarget {
+        self.clone().into_target()
+    }
+
+    /// The target, or `None` when no selector field was supplied at all.
+    fn optional_target(&self) -> Option<WindowTarget> {
+        let target = self.to_target();
+        target.has_target().then_some(target)
+    }
+
     fn into_target(self) -> WindowTarget {
         WindowTarget {
             window_id: self.window_id,
@@ -2314,24 +2325,10 @@ struct AppCandidate {
 struct GetAppStateParams {
     #[serde(default)]
     app_name_or_bundle_identifier: Option<String>,
-    #[serde(default)]
-    window_id: Option<u64>,
-    #[serde(default)]
-    pid: Option<u32>,
-    #[serde(default)]
-    tty: Option<String>,
-    #[serde(default)]
-    terminal_pid: Option<u32>,
-    #[serde(default)]
-    terminal_command: Option<String>,
-    #[serde(default)]
-    terminal_cwd: Option<String>,
-    #[serde(default)]
-    app_id: Option<String>,
-    #[serde(default)]
-    wm_class: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
+    /// Which window to act on: window_id, pid, app_id, wm_class, title, or a
+    /// terminal selector (tty, terminal_pid, terminal_command, terminal_cwd).
+    #[serde(flatten)]
+    target: ActivateWindowParams,
     /// Maximum raw AT-SPI nodes to inspect before compaction (default 1000, hard max 2000).
     #[serde(default)]
     max_nodes: Option<usize>,
@@ -2367,17 +2364,7 @@ struct GetAppStateParams {
 
 impl GetAppStateParams {
     fn window_target(&self) -> WindowTarget {
-        WindowTarget {
-            window_id: self.window_id,
-            pid: self.pid,
-            tty: self.tty.clone(),
-            terminal_pid: self.terminal_pid,
-            terminal_command: self.terminal_command.clone(),
-            terminal_cwd: self.terminal_cwd.clone(),
-            app_id: self.app_id.clone(),
-            wm_class: self.wm_class.clone(),
-            title: self.title.clone(),
-        }
+        self.target.to_target()
     }
 
     fn screenshot_options(&self) -> ScreenshotPayloadOptions {
@@ -2394,16 +2381,10 @@ impl GetAppStateParams {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct ScreenshotParams {
-    #[serde(default)]
-    window_id: Option<u64>,
-    #[serde(default)]
-    pid: Option<u32>,
-    #[serde(default)]
-    app_id: Option<String>,
-    #[serde(default)]
-    wm_class: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
+    /// Which window to act on: window_id, pid, app_id, wm_class, title, or a
+    /// terminal selector (tty, terminal_pid, terminal_command, terminal_cwd).
+    #[serde(flatten)]
+    target: ActivateWindowParams,
     /// Raise the targeted window before capture (default true). Ignored without
     /// a window target.
     #[serde(default)]
@@ -2442,25 +2423,7 @@ struct ScreenshotParams {
 
 impl ScreenshotParams {
     fn window_target(&self) -> Option<WindowTarget> {
-        if self.window_id.is_none()
-            && self.pid.is_none()
-            && self.app_id.is_none()
-            && self.wm_class.is_none()
-            && self.title.is_none()
-        {
-            return None;
-        }
-        Some(WindowTarget {
-            window_id: self.window_id,
-            pid: self.pid,
-            tty: None,
-            terminal_pid: None,
-            terminal_command: None,
-            terminal_cwd: None,
-            app_id: self.app_id.clone(),
-            wm_class: self.wm_class.clone(),
-            title: self.title.clone(),
-        })
+        self.target.optional_target()
     }
 
     fn screenshot_options(&self) -> ScreenshotPayloadOptions {
@@ -2575,16 +2538,10 @@ struct PointerPositionOutput {
 struct WaitForParams {
     #[serde(default)]
     app_name_or_bundle_identifier: Option<String>,
-    #[serde(default)]
-    window_id: Option<u64>,
-    #[serde(default)]
-    pid: Option<u32>,
-    #[serde(default)]
-    app_id: Option<String>,
-    #[serde(default)]
-    wm_class: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
+    /// Which window to act on: window_id, pid, app_id, wm_class, title, or a
+    /// terminal selector (tty, terminal_pid, terminal_command, terminal_cwd).
+    #[serde(flatten)]
+    target: ActivateWindowParams,
     /// Element predicate: role of the awaited element (substring, case-insensitive).
     #[serde(default)]
     role: Option<String>,
@@ -2631,11 +2588,7 @@ impl WaitForParams {
     fn app_state_params(&self) -> GetAppStateParams {
         GetAppStateParams {
             app_name_or_bundle_identifier: self.app_name_or_bundle_identifier.clone(),
-            window_id: self.window_id,
-            pid: self.pid,
-            app_id: self.app_id.clone(),
-            wm_class: self.wm_class.clone(),
-            title: self.title.clone(),
+            target: self.target.clone(),
             ..GetAppStateParams::default()
         }
     }
@@ -2751,16 +2704,10 @@ struct ClickParams {
     // Optional window target: when set, the window is raised/focused before the
     // click so a coordinate click reliably lands on the intended app rather than
     // whatever window happens to be stacked on top at that pixel.
-    #[serde(default)]
-    window_id: Option<u64>,
-    #[serde(default)]
-    pid: Option<u32>,
-    #[serde(default)]
-    app_id: Option<String>,
-    #[serde(default)]
-    wm_class: Option<String>,
-    #[serde(default)]
-    window_title: Option<String>,
+    /// Which window to act on: window_id, pid, app_id, wm_class, title, or a
+    /// terminal selector (tty, terminal_pid, terminal_command, terminal_cwd).
+    #[serde(flatten)]
+    target: ActivateWindowParams,
     /// Interpret `x`/`y` as relative to the targeted window's top-left corner
     /// (the same coordinate space as a window-cropped `screenshot`). Requires a
     /// window target; ignored otherwise.
@@ -2769,27 +2716,8 @@ struct ClickParams {
 }
 
 impl ClickParams {
-    /// A window target if any window-identifying field was supplied.
     fn window_target(&self) -> Option<WindowTarget> {
-        if self.window_id.is_none()
-            && self.pid.is_none()
-            && self.app_id.is_none()
-            && self.wm_class.is_none()
-            && self.window_title.is_none()
-        {
-            return None;
-        }
-        Some(WindowTarget {
-            window_id: self.window_id,
-            pid: self.pid,
-            tty: None,
-            terminal_pid: None,
-            terminal_command: None,
-            terminal_cwd: None,
-            app_id: self.app_id.clone(),
-            wm_class: self.wm_class.clone(),
-            title: self.window_title.clone(),
-        })
+        self.target.optional_target()
     }
 
     fn selector(&self) -> ElementSelector<'_> {
@@ -2867,7 +2795,7 @@ impl SetValueParams {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct ScrollParams {
     #[serde(default)]
     element_index: Option<u32>,
@@ -2880,16 +2808,10 @@ struct ScrollParams {
     pages: Option<f64>,
     // Optional window target (parity with click): the window is raised/focused
     // before scrolling so the wheel events land on the intended app.
-    #[serde(default)]
-    window_id: Option<u64>,
-    #[serde(default)]
-    pid: Option<u32>,
-    #[serde(default)]
-    app_id: Option<String>,
-    #[serde(default)]
-    wm_class: Option<String>,
-    #[serde(default)]
-    window_title: Option<String>,
+    /// Which window to act on: window_id, pid, app_id, wm_class, title, or a
+    /// terminal selector (tty, terminal_pid, terminal_command, terminal_cwd).
+    #[serde(flatten)]
+    target: ActivateWindowParams,
     /// Interpret `x`/`y` as relative to the targeted window's top-left corner
     /// (the same coordinate space as a window-cropped `screenshot`). Requires a
     /// window target; ignored otherwise.
@@ -2898,31 +2820,12 @@ struct ScrollParams {
 }
 
 impl ScrollParams {
-    /// A window target if any window-identifying field was supplied.
     fn window_target(&self) -> Option<WindowTarget> {
-        if self.window_id.is_none()
-            && self.pid.is_none()
-            && self.app_id.is_none()
-            && self.wm_class.is_none()
-            && self.window_title.is_none()
-        {
-            return None;
-        }
-        Some(WindowTarget {
-            window_id: self.window_id,
-            pid: self.pid,
-            tty: None,
-            terminal_pid: None,
-            terminal_command: None,
-            terminal_cwd: None,
-            app_id: self.app_id.clone(),
-            wm_class: self.wm_class.clone(),
-            title: self.window_title.clone(),
-        })
+        self.target.optional_target()
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct DragParams {
     /// Drag origin in desktop pixels, or window-relative with a window target
     /// and `relative: true`. Omit when `start_element_index` names the origin.
@@ -2954,40 +2857,15 @@ struct DragParams {
     relative: Option<bool>,
     // Optional window target: the window is raised/focused before the drag, so
     // it lands on the intended app rather than whatever is stacked on top.
-    #[serde(default)]
-    window_id: Option<u64>,
-    #[serde(default)]
-    pid: Option<u32>,
-    #[serde(default)]
-    app_id: Option<String>,
-    #[serde(default)]
-    wm_class: Option<String>,
-    #[serde(default)]
-    window_title: Option<String>,
+    /// Which window to act on: window_id, pid, app_id, wm_class, title, or a
+    /// terminal selector (tty, terminal_pid, terminal_command, terminal_cwd).
+    #[serde(flatten)]
+    target: ActivateWindowParams,
 }
 
 impl DragParams {
-    /// A window target if any window-identifying field was supplied.
     fn window_target(&self) -> Option<WindowTarget> {
-        if self.window_id.is_none()
-            && self.pid.is_none()
-            && self.app_id.is_none()
-            && self.wm_class.is_none()
-            && self.window_title.is_none()
-        {
-            return None;
-        }
-        Some(WindowTarget {
-            window_id: self.window_id,
-            pid: self.pid,
-            tty: None,
-            terminal_pid: None,
-            terminal_command: None,
-            terminal_cwd: None,
-            app_id: self.app_id.clone(),
-            wm_class: self.wm_class.clone(),
-            title: self.window_title.clone(),
-        })
+        self.target.optional_target()
     }
 }
 
@@ -3000,78 +2878,30 @@ struct PressKeyParams {
     /// them. Exactly one of `key` and `keys` must be given.
     #[serde(default)]
     keys: Vec<String>,
-    #[serde(default)]
-    window_id: Option<u64>,
-    #[serde(default)]
-    pid: Option<u32>,
-    #[serde(default)]
-    tty: Option<String>,
-    #[serde(default)]
-    terminal_pid: Option<u32>,
-    #[serde(default)]
-    terminal_command: Option<String>,
-    #[serde(default)]
-    terminal_cwd: Option<String>,
-    #[serde(default)]
-    app_id: Option<String>,
-    #[serde(default)]
-    wm_class: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
+    /// Which window to act on: window_id, pid, app_id, wm_class, title, or a
+    /// terminal selector (tty, terminal_pid, terminal_command, terminal_cwd).
+    #[serde(flatten)]
+    target: ActivateWindowParams,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct TypeTextParams {
     text: String,
-    #[serde(default)]
-    window_id: Option<u64>,
-    #[serde(default)]
-    pid: Option<u32>,
-    #[serde(default)]
-    tty: Option<String>,
-    #[serde(default)]
-    terminal_pid: Option<u32>,
-    #[serde(default)]
-    terminal_command: Option<String>,
-    #[serde(default)]
-    terminal_cwd: Option<String>,
-    #[serde(default)]
-    app_id: Option<String>,
-    #[serde(default)]
-    wm_class: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
+    /// Which window to act on: window_id, pid, app_id, wm_class, title, or a
+    /// terminal selector (tty, terminal_pid, terminal_command, terminal_cwd).
+    #[serde(flatten)]
+    target: ActivateWindowParams,
 }
 
 impl PressKeyParams {
     fn window_target(&self) -> WindowTarget {
-        WindowTarget {
-            window_id: self.window_id,
-            pid: self.pid,
-            tty: self.tty.clone(),
-            terminal_pid: self.terminal_pid,
-            terminal_command: self.terminal_command.clone(),
-            terminal_cwd: self.terminal_cwd.clone(),
-            app_id: self.app_id.clone(),
-            wm_class: self.wm_class.clone(),
-            title: self.title.clone(),
-        }
+        self.target.to_target()
     }
 }
 
 impl TypeTextParams {
     fn window_target(&self) -> WindowTarget {
-        WindowTarget {
-            window_id: self.window_id,
-            pid: self.pid,
-            tty: self.tty.clone(),
-            terminal_pid: self.terminal_pid,
-            terminal_command: self.terminal_command.clone(),
-            terminal_cwd: self.terminal_cwd.clone(),
-            app_id: self.app_id.clone(),
-            wm_class: self.wm_class.clone(),
-            title: self.title.clone(),
-        }
+        self.target.to_target()
     }
 }
 
@@ -3239,7 +3069,9 @@ impl ComputerUseLinux {
             return Some(explicit.to_string());
         }
 
-        let target_pid = window_context.and_then(|window| window.pid).or(params.pid);
+        let target_pid = window_context
+            .and_then(|window| window.pid)
+            .or(params.target.pid);
         let candidates = accessibility_filter_candidates(window_context);
 
         if let Some(target_pid) = target_pid {
@@ -3405,7 +3237,7 @@ impl ComputerUseLinux {
             let target_pid = window_context
                 .as_ref()
                 .and_then(|window| window.pid)
-                .or(params.pid);
+                .or(params.target.pid);
             let snapshot = match snapshot_tree(
                 app_filter.as_deref(),
                 target_pid,
@@ -6210,6 +6042,46 @@ mod tests {
     }
 
     #[test]
+    fn pointer_tools_carry_terminal_selectors_into_the_window_target() {
+        // click, scroll, drag and screenshot used to hardcode every terminal
+        // selector to None while the schema still advertised them, so a tty
+        // target was accepted and silently ignored.
+        let target = ActivateWindowParams {
+            tty: Some("/dev/pts/3".to_string()),
+            terminal_cwd: Some("/home/felipe/workspace".to_string()),
+            ..Default::default()
+        };
+
+        let click = ClickParams {
+            target: target.clone(),
+            ..Default::default()
+        }
+        .window_target()
+        .expect("a terminal selector is a window target");
+        assert_eq!(click.tty.as_deref(), Some("/dev/pts/3"));
+        assert_eq!(
+            click.terminal_cwd.as_deref(),
+            Some("/home/felipe/workspace")
+        );
+
+        let drag = DragParams {
+            target,
+            ..Default::default()
+        }
+        .window_target()
+        .expect("a terminal selector is a window target");
+        assert_eq!(drag.tty.as_deref(), Some("/dev/pts/3"));
+    }
+
+    #[test]
+    fn no_selector_at_all_is_no_window_target() {
+        assert!(ClickParams::default().window_target().is_none());
+        assert!(ScrollParams::default().window_target().is_none());
+        assert!(DragParams::default().window_target().is_none());
+        assert!(ScreenshotParams::default().window_target().is_none());
+    }
+
+    #[test]
     fn drag_endpoint_resolves_an_element_index_to_its_centre() {
         let backend = ComputerUseLinux::default();
         backend.cache_nodes(&[node(
@@ -7365,7 +7237,10 @@ mod tests {
     fn wait_for_requires_a_predicate() {
         assert!(!wait_for_has_predicate(&WaitForParams::default()));
         assert!(!wait_for_has_predicate(&WaitForParams {
-            pid: Some(42),
+            target: ActivateWindowParams {
+                pid: Some(42),
+                ..Default::default()
+            },
             window_title: Some("   ".to_string()),
             ..Default::default()
         }));
@@ -7398,14 +7273,17 @@ mod tests {
     #[test]
     fn wait_for_params_map_onto_app_state_targeting() {
         let params = WaitForParams {
-            pid: Some(4242),
-            title: Some("Sophia".to_string()),
+            target: ActivateWindowParams {
+                pid: Some(4242),
+                title: Some("Sophia".to_string()),
+                ..Default::default()
+            },
             role: Some("button".to_string()),
             ..Default::default()
         };
         let app_state = params.app_state_params();
-        assert_eq!(app_state.pid, Some(4242));
-        assert_eq!(app_state.title.as_deref(), Some("Sophia"));
+        assert_eq!(app_state.target.pid, Some(4242));
+        assert_eq!(app_state.target.title.as_deref(), Some("Sophia"));
         assert!(app_state.window_target().has_target());
         assert_eq!(params.selector().role, Some("button"));
     }
@@ -7980,11 +7858,10 @@ mod tests {
             y: Some(20),
             direction: "down".to_string(),
             pages: None,
-            window_id: Some(1),
-            pid: None,
-            app_id: None,
-            wm_class: None,
-            window_title: None,
+            target: ActivateWindowParams {
+                window_id: Some(1),
+                ..Default::default()
+            },
             relative: Some(true),
         };
         apply_window_relative_scroll_coordinates(&mut params, (100, 200, 800, 600)).unwrap();
@@ -8000,11 +7877,10 @@ mod tests {
             y: None,
             direction: "down".to_string(),
             pages: None,
-            window_id: Some(1),
-            pid: None,
-            app_id: None,
-            wm_class: None,
-            window_title: None,
+            target: ActivateWindowParams {
+                window_id: Some(1),
+                ..Default::default()
+            },
             relative: None,
         };
         apply_window_center_scroll_point(&mut params, (100, 200, 800, 600)).unwrap();
@@ -8020,11 +7896,10 @@ mod tests {
             y: None,
             direction: "down".to_string(),
             pages: None,
-            window_id: Some(1),
-            pid: None,
-            app_id: None,
-            wm_class: None,
-            window_title: None,
+            target: ActivateWindowParams {
+                window_id: Some(1),
+                ..Default::default()
+            },
             relative: None,
         };
         let error = apply_window_center_scroll_point(&mut params, (0, 0, 0, 0)).unwrap_err();
@@ -8041,11 +7916,10 @@ mod tests {
             y: Some(20),
             direction: "down".to_string(),
             pages: None,
-            window_id: Some(1),
-            pid: None,
-            app_id: None,
-            wm_class: None,
-            window_title: None,
+            target: ActivateWindowParams {
+                window_id: Some(1),
+                ..Default::default()
+            },
             relative: Some(true),
         };
         assert!(
