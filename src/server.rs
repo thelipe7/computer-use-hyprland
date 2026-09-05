@@ -461,7 +461,11 @@ impl ComputerUseLinux {
         }
         Json(GetAppStateOutput {
             app_name_or_bundle_identifier: params.app_name_or_bundle_identifier,
-            window_context,
+            window_context_source: window_context_source(
+                window_context.as_ref(),
+                bounds_window.as_ref(),
+            ),
+            window_context: bounds_window,
             window_error,
             window_permissions_hint,
             backend: "linux-atspi".to_string(),
@@ -539,6 +543,7 @@ impl ComputerUseLinux {
                 elapsed_ms: 0,
                 element: None,
                 window_context: None,
+                window_context_source: None,
                 focused_window: None,
                 last_tree_summary: None,
                 message: "wait_for needs at least one predicate: an element selector (role/name/text/states), window_title, or focused_window.".to_string(),
@@ -576,6 +581,7 @@ impl ComputerUseLinux {
                     elapsed_ms,
                     element: probe.element,
                     window_context: probe.window_context,
+                    window_context_source: probe.window_context_source,
                     focused_window: probe.focused_window,
                     last_tree_summary: probe.summary,
                     message: format!("Predicates satisfied after {elapsed_ms} ms.{element_note}"),
@@ -605,6 +611,7 @@ impl ComputerUseLinux {
             elapsed_ms,
             element: None,
             window_context: last.window_context,
+            window_context_source: last.window_context_source,
             focused_window: last.focused_window,
             last_tree_summary: last.summary,
             message: format!(
@@ -3156,6 +3163,9 @@ struct WaitForOutput {
     /// cached by this call.
     element: Option<AccessibilityNode>,
     window_context: Option<WindowInfo>,
+    /// How `window_context` was found; absent when there is no window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    window_context_source: Option<WindowContextSource>,
     focused_window: Option<WindowInfo>,
     last_tree_summary: Option<String>,
     message: String,
@@ -3168,6 +3178,7 @@ struct WaitProbe {
     satisfied: bool,
     element: Option<AccessibilityNode>,
     window_context: Option<WindowInfo>,
+    window_context_source: Option<WindowContextSource>,
     focused_window: Option<WindowInfo>,
     summary: Option<String>,
     error: Option<String>,
@@ -3201,6 +3212,9 @@ fn node_has_state(node: &AccessibilityNode, state: &str) -> bool {
 struct GetAppStateOutput {
     app_name_or_bundle_identifier: Option<String>,
     window_context: Option<WindowInfo>,
+    /// How `window_context` was found; absent when there is no window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    window_context_source: Option<WindowContextSource>,
     window_error: Option<String>,
     window_permissions_hint: Option<String>,
     backend: String,
@@ -4041,6 +4055,7 @@ impl ComputerUseLinux {
             return probe;
         }
         probe.window_context = window_context.clone();
+        probe.window_context_source = window_context_source(window_context.as_ref(), None);
 
         if let Some(needle) = trimmed_nonempty(params.window_title.as_deref()) {
             let title_window = match window_context.as_ref() {
@@ -4148,6 +4163,9 @@ impl ComputerUseLinux {
                 }
             };
             self.cache_tree(&nodes, bounds_window.as_ref());
+            probe.window_context_source =
+                window_context_source(window_context.as_ref(), bounds_window.as_ref());
+            probe.window_context = bounds_window;
             probe.element = Some(element);
         }
 
@@ -5228,6 +5246,37 @@ fn sole_window_for_pids<'a>(windows: &'a [WindowInfo], pids: &[u32]) -> Option<&
         .filter(|window| window.pid.is_some_and(|pid| pids.contains(&pid)));
     let window = matches.next()?;
     matches.next().is_none().then_some(window)
+}
+
+/// How the window reported alongside a tree was arrived at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum WindowContextSource {
+    /// The caller named a window target and it resolved to this window.
+    Target,
+    /// The caller named none. This is the sole window of the process whose
+    /// AT-SPI tree was walked, and it is the origin the tree's
+    /// window-relative bounds are offset by.
+    AppPid,
+}
+
+/// Which of the two answers the reported window is.
+///
+/// A tree anchored through the app's own pid belongs in `window_context` just
+/// as much as a resolved target does: it is the window every element point was
+/// offset by, so a caller reading the field to learn where the app is gets
+/// what the click path used instead of a null that reads as "no window was
+/// involved". The source keeps the two distinguishable without parsing prose
+/// out of the message.
+fn window_context_source(
+    target: Option<&WindowInfo>,
+    reported: Option<&WindowInfo>,
+) -> Option<WindowContextSource> {
+    match (target, reported) {
+        (Some(_), _) => Some(WindowContextSource::Target),
+        (None, Some(_)) => Some(WindowContextSource::AppPid),
+        (None, None) => None,
+    }
 }
 
 /// The window a window-relative tree belongs to and the origin it had when
@@ -8200,6 +8249,39 @@ mod tests {
         assert_eq!(
             window_id(sole_window_for_pids(&[first, second], &[4242])),
             None
+        );
+    }
+
+    #[test]
+    fn a_resolved_target_is_reported_as_the_window_context_source() {
+        let target = placed_window(Some(965), Some(48));
+
+        assert_eq!(
+            window_context_source(Some(&target), Some(&target)),
+            Some(WindowContextSource::Target)
+        );
+    }
+
+    #[test]
+    fn a_tree_anchored_through_its_own_pid_reports_the_window_it_was_tied_to() {
+        let anchored = placed_window(Some(965), Some(48));
+
+        assert_eq!(
+            window_context_source(None, Some(&anchored)),
+            Some(WindowContextSource::AppPid)
+        );
+        assert_eq!(window_context_source(None, None), None);
+    }
+
+    #[test]
+    fn a_window_context_source_serializes_in_the_case_the_payload_uses() {
+        assert_eq!(
+            serde_json::to_string(&WindowContextSource::AppPid).unwrap(),
+            "\"app_pid\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WindowContextSource::Target).unwrap(),
+            "\"target\""
         );
     }
 
