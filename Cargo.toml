@@ -2,23 +2,16 @@
 name = "computer-use-linux"
 version = "0.5.0"
 edition = "2021"
-authors = ["Avi Fenesh <avifenesh@users.noreply.github.com>"]
+authors = ["Felipe Machado <felipemmachado266@gmail.com>"]
 license = "MIT"
-description = "Linux desktop control over MCP — AT-SPI accessibility tree, multi-compositor window targeting (GNOME, KWin, Hyprland, i3, COSMIC), screencast portal screenshots, and ydotool input synthesis. Wayland-first, X11 best-effort."
-homepage = "https://github.com/agent-sh/computer-use-linux"
-repository = "https://github.com/agent-sh/computer-use-linux"
-documentation = "https://github.com/agent-sh/computer-use-linux#readme"
+description = "Hyprland desktop control over MCP: AT-SPI accessibility tree, hyprctl window targeting, portal screenshots, and uinput input synthesis."
+repository = "https://github.com/thelipe7/computer-use-linux"
 readme = "README.md"
-keywords = ["mcp", "computer-use", "accessibility", "gnome", "wayland"]
-categories = ["accessibility", "command-line-utilities", "os::linux-apis"]
+publish = false
 
 [[bin]]
 name = "computer-use-linux"
 path = "src/main.rs"
-
-[[bin]]
-name = "computer-use-linux-cosmic"
-path = "src/bin/computer-use-linux-cosmic.rs"
 
 [dependencies]
 mimalloc = { version = "0.1", default-features = false }
@@ -27,13 +20,12 @@ anyhow = "1.0.104"
 # with default features, which include "p2p" — and p2p peer enumeration during
 # connect() calls GetInterfaces on every a11y-bus peer, so a single
 # AppArmor-confined peer (e.g. snap-packaged Slack) aborts the whole
-# AccessibilityConnection. We deliberately never use P2P routing (issue #31),
+# AccessibilityConnection. We deliberately never use P2P routing,
 # so depend on atspi-connection directly with p2p off.
 atspi = { version = "0.30.0", default-features = false, features = ["proxies", "wrappers", "tokio"] }
 atspi-connection = { version = "0.14.0", default-features = false, features = ["wrappers"] }
 base64 = "0.23.1"
 evdev = "0.13.2"
-cosmic-protocols = { version = "0.2.0", default-features = false, features = ["client"] }
 futures-util = "0.3.34"
 getrandom = "0.4.3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
@@ -44,10 +36,6 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 tokio = { version = "1.53.1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }
-wayland-client = "0.31.15"
-wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
-wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
-xkeysym = "0.2.1"
 zbus = "5.19.0"
 
 [profile.release]
