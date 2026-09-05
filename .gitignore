@@ -32,10 +32,10 @@ __pycache__/
 *.py[cod]
 
 # npm wrapper postinstall artifacts from local smoke tests
-/npm/bin/computer-use-linux-linux-*
-/npm/bin/computer-use-linux-darwin-*
-/npm/bin/computer-use-linux-win32-*
-/npm/bin/computer-use-linux-cosmic
+/npm/bin/computer-use-hyprland-linux-*
+/npm/bin/computer-use-hyprland-darwin-*
+/npm/bin/computer-use-hyprland-win32-*
+/npm/bin/computer-use-hyprland-cosmic
 /.agent-shell/
 
 

@@ -24,7 +24,7 @@ const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
 const PROBE_DIRECTORY_ATTEMPTS: usize = 8;
 const PROBE_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 const FAILED_PROBE_CACHE_TTL: Duration = Duration::from_secs(5);
-const PROBE_PREFIX: &str = ".computer-use-linux-ydotool-probe";
+const PROBE_PREFIX: &str = ".computer-use-hyprland-ydotool-probe";
 const UNSUPPORTED_MESSAGE: &str = "unsupported ydotool CLI; Computer Use requires ydotool 1.0.3 or newer with raw key events, wheel movement, stdin typing, and absolute mouse movement";
 
 struct ProbeSocket {
@@ -500,7 +500,7 @@ mod tests {
     impl TestDirectory {
         fn new(label: &str) -> Self {
             let path = env::temp_dir().join(format!(
-                "computer-use-linux-ydotool-{label}-{}-{}",
+                "computer-use-hyprland-ydotool-{label}-{}-{}",
                 process::id(),
                 random_hex(8).expect("test nonce")
             ));

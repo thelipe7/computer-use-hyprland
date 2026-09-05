@@ -1707,7 +1707,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "run_shell",
-        description = "Execute one explicitly approved /bin/sh command with same-user host authority. This tool is absent unless the server operator starts computer-use-linux with COMPUTER_USE_LINUX_ENABLE_SHELL=1. It is not sandboxed: the command can read or modify files and use the network with the server user's permissions. The inherited environment is cleared to a small desktop/runtime allowlist; pass any additional variables explicitly. Execution time and output are bounded: returned streams are truncated to 512 KiB, while a stream exceeding the 8 MiB collection ceiling fails the call without returning partial output. An audit digest is written to server stderr.",
+        description = "Execute one explicitly approved /bin/sh command with same-user host authority. This tool is absent unless the server operator starts computer-use-hyprland with COMPUTER_USE_LINUX_ENABLE_SHELL=1. It is not sandboxed: the command can read or modify files and use the network with the server user's permissions. The inherited environment is cleared to a small desktop/runtime allowlist; pass any additional variables explicitly. Execution time and output are bounded: returned streams are truncated to 512 KiB, while a stream exceeding the 8 MiB collection ceiling fails the call without returning partial output. An audit digest is written to server stderr.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1800,7 +1800,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "move_window",
-        description = "Move a window to a new desktop position (frame top-left in desktop coordinates). Useful to recover windows that are partially off-screen. Works through the computer-use-linux GNOME Shell extension or a generic X11/EWMH window manager (wmctrl).",
+        description = "Move a window to a new desktop position (frame top-left in desktop coordinates). Useful to recover windows that are partially off-screen. Works through the computer-use-hyprland GNOME Shell extension or a generic X11/EWMH window manager (wmctrl).",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1822,7 +1822,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "resize_window",
-        description = "Resize a window to a new frame width/height in desktop pixels, unmaximizing it first if needed. Useful to fit a window fully on-screen. Works through the computer-use-linux GNOME Shell extension or a generic X11/EWMH window manager (wmctrl).",
+        description = "Resize a window to a new frame width/height in desktop pixels, unmaximizing it first if needed. Useful to fit a window fully on-screen. Works through the computer-use-hyprland GNOME Shell extension or a generic X11/EWMH window manager (wmctrl).",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1867,7 +1867,7 @@ impl ComputerUseLinux {
 
 #[tool_handler(
     router = self.mcp_tool_router(),
-    name = "computer-use-linux",
+    name = "computer-use-hyprland",
     // NOTE: keep in lockstep with Cargo.toml + package.json on every release.
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
@@ -2103,7 +2103,7 @@ async fn execute_shell(params: RunShellParams) -> RunShellOutput {
     child.envs(&params.env);
 
     eprintln!(
-        "[computer-use-linux] run_shell start sha256={command_sha256} cwd={cwd_display:?} timeout_seconds={timeout_seconds}"
+        "[computer-use-hyprland] run_shell start sha256={command_sha256} cwd={cwd_display:?} timeout_seconds={timeout_seconds}"
     );
     match crate::command_runner::output_with_timeout(
         child,
@@ -2117,7 +2117,7 @@ async fn execute_shell(params: RunShellParams) -> RunShellOutput {
             let (stdout, stdout_truncated) = bounded_shell_stream(&output.stdout);
             let (stderr, stderr_truncated) = bounded_shell_stream(&output.stderr);
             eprintln!(
-                "[computer-use-linux] run_shell finish sha256={command_sha256} exit_code={exit_code:?} stdout_bytes={} stderr_bytes={} stdout_truncated={stdout_truncated} stderr_truncated={stderr_truncated}",
+                "[computer-use-hyprland] run_shell finish sha256={command_sha256} exit_code={exit_code:?} stdout_bytes={} stderr_bytes={} stdout_truncated={stdout_truncated} stderr_truncated={stderr_truncated}",
                 output.stdout.len(),
                 output.stderr.len()
             );
@@ -2137,7 +2137,7 @@ async fn execute_shell(params: RunShellParams) -> RunShellOutput {
         Err(error) => {
             let error = format!("{error:#}");
             eprintln!(
-                "[computer-use-linux] run_shell error sha256={command_sha256} error={error:?}"
+                "[computer-use-hyprland] run_shell error sha256={command_sha256} error={error:?}"
             );
             shell_error_output(command_sha256, cwd_display, timeout_seconds, error)
         }
@@ -7381,7 +7381,7 @@ mod tests {
     #[tokio::test]
     async fn wtype_receives_unicode_text_through_stdin() {
         let dir = std::env::temp_dir().join(format!(
-            "computer-use-linux-wtype-unicode-{}-{:?}",
+            "computer-use-hyprland-wtype-unicode-{}-{:?}",
             std::process::id(),
             std::time::SystemTime::now()
         ));
@@ -7430,7 +7430,7 @@ mod tests {
     #[tokio::test]
     async fn launched_wtype_failure_does_not_replay_through_ydotool() {
         let dir = std::env::temp_dir().join(format!(
-            "computer-use-linux-wtype-fallback-{}-{:?}",
+            "computer-use-hyprland-wtype-fallback-{}-{:?}",
             std::process::id(),
             std::time::SystemTime::now()
         ));
@@ -7555,7 +7555,7 @@ mod tests {
     #[test]
     fn ydotool_socket_selection_rejects_legacy_stream_socket() {
         let dir =
-            std::env::temp_dir().join(format!("computer-use-linux-server-{}", std::process::id()));
+            std::env::temp_dir().join(format!("computer-use-hyprland-server-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp server dir");
         let stale_socket = dir.join("stale.sock");
@@ -7574,7 +7574,7 @@ mod tests {
     #[test]
     fn ydotool_socket_selection_accepts_datagram_socket() {
         let dir = std::env::temp_dir().join(format!(
-            "computer-use-linux-server-dgram-{}",
+            "computer-use-hyprland-server-dgram-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);

@@ -2,7 +2,7 @@
 //!
 //! Two servers driving the same desktop interleave their pointer and keyboard
 //! events, so the first input action of a process takes `flock` on
-//! `$XDG_RUNTIME_DIR/computer-use-linux.lock` and keeps it until the process
+//! `$XDG_RUNTIME_DIR/computer-use-hyprland.lock` and keeps it until the process
 //! exits. Read-only tools never touch it. The file carries the holder's pid so
 //! a second server can name it.
 
@@ -13,7 +13,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-const LOCK_FILE_NAME: &str = "computer-use-linux.lock";
+const LOCK_FILE_NAME: &str = "computer-use-hyprland.lock";
 
 static HELD: Mutex<Option<File>> = Mutex::new(None);
 
@@ -113,7 +113,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "computer-use-linux-test-{}-{nanos}.lock",
+            "computer-use-hyprland-test-{}-{nanos}.lock",
             std::process::id()
         ))
     }

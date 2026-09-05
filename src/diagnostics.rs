@@ -1345,7 +1345,7 @@ mod tests {
     #[test]
     fn ydotool_socket_check_rejects_legacy_stream_socket() {
         let dir = std::env::temp_dir().join(format!(
-            "computer-use-linux-diagnostics-{}",
+            "computer-use-hyprland-diagnostics-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1364,7 +1364,7 @@ mod tests {
     #[test]
     fn ydotool_socket_check_accepts_datagram_socket() {
         let dir = std::env::temp_dir().join(format!(
-            "computer-use-linux-diagnostics-dgram-{}",
+            "computer-use-hyprland-diagnostics-dgram-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);

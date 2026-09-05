@@ -1,4 +1,4 @@
-# computer-use-linux
+# computer-use-hyprland
 
 An MCP server that lets an agent drive this desktop: read the accessibility
 tree, take screenshots, target windows, and send input.
@@ -37,7 +37,7 @@ session after reinstalling.
 Then check the machine:
 
 ```bash
-computer-use-linux doctor
+computer-use-hyprland doctor
 ```
 
 `readiness.blockers` empty means it is ready. `mcp` is the subcommand an MCP

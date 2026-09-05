@@ -150,7 +150,7 @@ fn abs_test_report(
 
 fn print_help() {
     println!(
-        "computer-use-linux\n\nUsage:\n  computer-use-linux mcp\n  computer-use-linux doctor\n  computer-use-linux setup\n  computer-use-linux apps\n  computer-use-linux state [APP_NAME]\n  computer-use-linux screenshot\n  computer-use-linux windows\n  computer-use-linux abs-test X Y"
+        "computer-use-hyprland\n\nUsage:\n  computer-use-hyprland mcp\n  computer-use-hyprland doctor\n  computer-use-hyprland setup\n  computer-use-hyprland apps\n  computer-use-hyprland state [APP_NAME]\n  computer-use-hyprland screenshot\n  computer-use-hyprland windows\n  computer-use-hyprland abs-test X Y"
     );
 }
 

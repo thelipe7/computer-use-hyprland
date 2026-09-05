@@ -638,7 +638,7 @@ mod tests {
 
     fn temporary_pid_path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "computer-use-linux-command-runner-{label}-{}-{}.pid",
+            "computer-use-hyprland-command-runner-{label}-{}-{}.pid",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

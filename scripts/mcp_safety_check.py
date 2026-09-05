@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Contract and safety smoke test for the computer-use-linux MCP surface."""
+"""Contract and safety smoke test for the computer-use-hyprland MCP surface."""
 
 from __future__ import annotations
 
@@ -256,7 +256,7 @@ def assert_tool_annotations(tool: dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--binary", default="target/debug/computer-use-linux")
+    parser.add_argument("--binary", default="target/debug/computer-use-hyprland")
     parser.add_argument("--repo", default=".")
     args = parser.parse_args()
 
@@ -282,13 +282,13 @@ def main() -> int:
             {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
-                "clientInfo": {"name": "computer-use-linux-ci", "version": "0"},
+                "clientInfo": {"name": "computer-use-hyprland-ci", "version": "0"},
             },
         )["result"]
         client.notify("notifications/initialized", {})
 
         server_info = initialize.get("serverInfo") or {}
-        if server_info.get("name") != "computer-use-linux":
+        if server_info.get("name") != "computer-use-hyprland":
             raise AssertionError(f"unexpected server name: {server_info!r}")
         if server_info.get("version") != version:
             raise AssertionError(f"MCP server version {server_info.get('version')!r} != Cargo version {version!r}")
@@ -361,7 +361,7 @@ def main() -> int:
     finally:
         client.close()
 
-    shell_home = tempfile.TemporaryDirectory(prefix="computer-use-linux-shell-home-")
+    shell_home = tempfile.TemporaryDirectory(prefix="computer-use-hyprland-shell-home-")
     pathlib.Path(shell_home.name, ".profile").write_text(
         "export COMPUTER_USE_LINUX_PROFILE_SECRET=must-not-be-loaded\n",
         encoding="utf-8",
@@ -380,7 +380,7 @@ def main() -> int:
             {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
-                "clientInfo": {"name": "computer-use-linux-shell-ci", "version": "0"},
+                "clientInfo": {"name": "computer-use-hyprland-shell-ci", "version": "0"},
             },
         )
         shell_client.notify("notifications/initialized", {})

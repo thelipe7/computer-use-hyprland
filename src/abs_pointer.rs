@@ -84,7 +84,7 @@ impl AbsPointer {
 
         let device = VirtualDevice::builder()
             .context("uinput builder (is /dev/uinput writable?)")?
-            .name("computer-use-linux absolute pointer")
+            .name("computer-use-hyprland absolute pointer")
             .with_properties(&props)?
             .with_absolute_axis(&abs_x)?
             .with_absolute_axis(&abs_y)?

@@ -9,7 +9,7 @@ gate a change has to pass before it lands.
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-python3 scripts/mcp_safety_check.py --binary target/debug/computer-use-linux
+python3 scripts/mcp_safety_check.py --binary target/debug/computer-use-hyprland
 ```
 
 The safety check spawns the binary, does the MCP handshake, and asserts the

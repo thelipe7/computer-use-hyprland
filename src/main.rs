@@ -7,5 +7,5 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    computer_use_linux::run_cli_from_env().await
+    computer_use_hyprland::run_cli_from_env().await
 }

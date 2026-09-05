@@ -1,16 +1,16 @@
 [package]
-name = "computer-use-linux"
+name = "computer-use-hyprland"
 version = "0.6.0"
 edition = "2021"
 authors = ["Felipe Machado <felipemmachado266@gmail.com>"]
 license = "MIT"
 description = "Hyprland desktop control over MCP: AT-SPI accessibility tree, hyprctl window targeting, portal screenshots, and uinput input synthesis."
-repository = "https://github.com/thelipe7/computer-use-linux"
+repository = "https://github.com/thelipe7/computer-use-hyprland"
 readme = "README.md"
 publish = false
 
 [[bin]]
-name = "computer-use-linux"
+name = "computer-use-hyprland"
 path = "src/main.rs"
 
 [dependencies]

@@ -648,13 +648,13 @@ fn percent_decode(value: &str) -> String {
 
 fn temp_png_path(source: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
-        "computer-use-linux-{source}-{}.png",
+        "computer-use-hyprland-{source}-{}.png",
         unique_suffix()
     ))
 }
 
 fn request_token() -> String {
-    format!("computer_use_linux_{}", unique_suffix().replace('-', "_"))
+    format!("computer_use_hyprland_{}", unique_suffix().replace('-', "_"))
 }
 
 fn unique_suffix() -> String {
@@ -671,7 +671,7 @@ mod tests {
 
     fn test_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "computer-use-linux-screenshot-test-{name}-{}",
+            "computer-use-hyprland-screenshot-test-{name}-{}",
             unique_suffix()
         ))
     }
@@ -770,7 +770,7 @@ mod tests {
     #[test]
     fn request_token_is_portal_safe() {
         let token = request_token();
-        assert!(token.starts_with("computer_use_linux_"));
+        assert!(token.starts_with("computer_use_hyprland_"));
         assert!(token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
     }
 
