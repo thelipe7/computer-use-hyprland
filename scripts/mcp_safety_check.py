@@ -39,6 +39,21 @@ EXPECTED_TOOLS = {
 }
 SHELL_TOOL = "run_shell"
 
+# The selector set every window-targeted tool shares. `window_title` is not in
+# it: on wait_for that name is a predicate, the substring the target window's
+# title must contain, and no other tool may use it for anything.
+WINDOW_SELECTORS = {
+    "window_id",
+    "pid",
+    "app_id",
+    "wm_class",
+    "title",
+    "tty",
+    "terminal_pid",
+    "terminal_command",
+    "terminal_cwd",
+}
+
 INJECTION_PATTERNS = [
     re.compile(pattern, re.IGNORECASE)
     for pattern in [
@@ -297,6 +312,24 @@ def main() -> int:
         names = {tool.get("name") for tool in tools}
         if names != EXPECTED_TOOLS:
             raise AssertionError(f"unexpected tools: missing={EXPECTED_TOOLS - names}, extra={names - EXPECTED_TOOLS}")
+
+        # Every window-targeted tool must expose the whole selector set. Seven
+        # params structs used to redeclare it and the copies drifted: three
+        # tools called `title` `window_title`, and three accepted the terminal
+        # selectors in the schema while dropping them on the floor.
+        for tool in tools:
+            props = set((tool.get("inputSchema") or {}).get("properties") or {})
+            if "window_id" not in props:
+                continue
+            missing = WINDOW_SELECTORS - props
+            if missing:
+                raise AssertionError(
+                    f"{tool['name']} takes a window target but is missing selectors: {sorted(missing)}"
+                )
+            if "window_title" in props and tool["name"] != "wait_for":
+                raise AssertionError(
+                    f"{tool['name']} exposes window_title; the window selector is called title"
+                )
 
         for tool in tools:
             name = tool["name"]
