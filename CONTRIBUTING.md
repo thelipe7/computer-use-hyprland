@@ -1,53 +1,34 @@
-# Contributing to computer-use-linux
+# Contributing
 
-Thanks for helping improve Linux desktop control for MCP hosts.
+This is a single-maintainer fork. There is no PR process; what follows is the
+gate a change has to pass before it lands.
 
-## Development Setup
-
-```bash
-git clone https://github.com/agent-sh/computer-use-linux.git
-cd computer-use-linux
-cargo check --locked
-cargo test --locked
-```
-
-For npm wrapper work:
-
-```bash
-node --check npm/install.js
-node --check npm/bin/computer-use-linux.js
-npm pack --dry-run
-```
-
-## Before Opening a PR
-
-Run the same gates CI runs:
+## Verification
 
 ```bash
 cargo fmt --all -- --check
-cargo check --locked --all-targets
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked --no-fail-fast
-scripts/install_sh_test.sh
-scripts/mcp_safety_check.py
-agnix .
+cargo clippy --all-targets -- -D warnings
+cargo test
+python3 scripts/mcp_safety_check.py --binary target/debug/computer-use-linux
 ```
 
-If you changed release packaging, also run:
+The safety check spawns the binary, does the MCP handshake, and asserts the
+exact tool set, that `run_shell` stays opt-in, and that the exported JSON
+schemas are well-formed. Add a tool, and its name goes in `EXPECTED_TOOLS`.
 
-```bash
-cargo publish --dry-run --locked
-npm pack --dry-run
-```
+## Scope
 
-## PR Guidelines
+The supported environment is Hyprland on Wayland. A change that only makes
+sense on another desktop does not belong here — the other backends were
+removed because nobody could test them.
 
-- Keep changes focused and explain the desktop/session you tested on.
-- Include `computer-use-linux doctor` output for compositor, portal, or accessibility issues.
-- Preserve the MCP safety annotations when adding or changing tools.
-- Update `README.md`, `npm/README.md`, and `skills/computer-use-linux/SKILL.md` when user-facing commands change.
-- Use conventional commit prefixes when practical (`fix:`, `feat:`, `docs:`, `chore:`).
+## Commits
 
-## Security
+Conventional Commits subject line, an imperative body that says why rather
+than what, and `git commit -s`.
 
-Do not open public issues for vulnerabilities. See [SECURITY.md](SECURITY.md).
+## Versions
+
+`Cargo.toml` and the `version` literal in the `tool_handler` attribute in
+`src/server.rs` must match; the macro only accepts a string literal, so it
+cannot read `CARGO_PKG_VERSION`.
