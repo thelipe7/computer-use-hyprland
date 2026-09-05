@@ -2,56 +2,55 @@
 name: computer-use
 description: >
   Use when driving a desktop application on Hyprland through the
-  computer-use-hyprland MCP server — reading an accessibility tree, finding and
-  focusing a window, clicking, typing, pressing a chord, dragging, scrolling,
-  taking a screenshot, or moving and resizing a window. Covers the order the
-  tools go in, the one window-selector vocabulary they share, and the four
-  failures that look like bugs and are not: dead element indices, the
-  machine-wide input lock, a tiled window refusing an exact geometry, and a
-  portal that cannot screenshot.
+  computer-use-hyprland MCP server — reading an accessibility tree, focusing a
+  window, clicking, typing, pressing a chord, dragging, scrolling, taking a
+  screenshot, or moving a window. Covers the order the tools go in, the one
+  selector vocabulary they share, and the four failures that look like bugs:
+  dead element indices, the machine-wide input lock, a tiled window refusing an
+  exact geometry, and a portal that cannot screenshot.
 ---
 
 # Driving a Hyprland desktop
 
-The server is `computer-use-hyprland`. Every tool it exposes is listed by the
-client; this says how they fit together and where the surprises are.
+The client lists what the server exposes. This says how the tools fit together
+and where the surprises are.
 
 ## The loop
 
-1. **`doctor`, once per session, when anything looks off.** It reports the
-   compositor, the portal, the accessibility bus and each input backend.
-   `readiness.blockers` empty means the machine is ready. Everything below
-   assumes it is; a failure with a non-empty `blockers` is that, not the tool.
+1. **`doctor` when anything looks off.** It reports the compositor, the
+   portal, the accessibility bus and each input backend. `readiness.blockers`
+   empty means the machine is ready, and a failure with something in it is
+   that, not the tool.
 2. **Find the window.** `list_windows` or `focused_window` to see what is
-   there, `activate_window` to focus one. Targeted input refuses to run if
-   focus cannot be verified, so this step is not optional.
+   there, `activate_window` to focus one. Targeted input refuses to run when
+   focus cannot be verified, so this is not an optional step.
 3. **Read before acting.** `get_app_state` returns the accessibility tree with
-   an `element_index` on each node. That index is how everything else names an
+   an `element_index` on every node, which is how the other tools name an
    element. Pass `pid` or `window_id`: an untargeted tree is anchored to a
    window only when exactly one matches, and element coordinates are offsets
    from that window's origin.
 4. **Act**: `click`, `type_text`, `press_key`, `drag`, `scroll`,
    `perform_action`, `set_value`.
-5. **Verify.** `wait_for` blocks until a predicate holds, up to `timeout_ms`.
-   Use it instead of sleeping — a sleep either wastes the time or is too short,
-   and `wait_for` returns the tree as it is when the predicate holds.
+5. **Verify with `wait_for`,** which blocks until a predicate holds, up to
+   `timeout_ms`, and returns the tree as it is when it does. Use it instead of
+   sleeping: a sleep either wastes the time or is too short.
 
 ## One selector vocabulary
 
 Every window-targeted tool — `activate_window`, `get_app_state`, `wait_for`,
 `screenshot`, `click`, `scroll`, `drag`, `press_key`, `type_text`,
 `move_window`, `resize_window`, `set_window_floating` — takes the same nine
-selectors, and any of them may be used on any of those tools:
+selectors, and any of them works on any of those tools:
 
 `window_id`, `pid`, `app_id`, `wm_class`, `title`, and the four that resolve a
 terminal: `tty`, `terminal_pid`, `terminal_command`, `terminal_cwd`.
 
 `window_id` is exact and comes from `list_windows`; the rest match. Pass none
-of them and the tool acts on whatever is focused.
+and the tool acts on whatever is focused.
 
 **`window_title` is not a tenth selector.** It exists on `wait_for` alone and
-means something else: the predicate, the substring the focused window's title
-has to contain before the wait returns. The selector is always `title`.
+means the predicate: the substring the focused window's title has to contain
+before the wait returns. The selector is always `title`.
 
 ## Naming an element
 
@@ -61,110 +60,68 @@ In order of how much they promise:
 - **`object_ref` / `element_identifier`**, which survive a re-read of the tree.
 - **A semantic selector** — `role`, `name`, `text`, `states` — when it matches
   exactly one node. More than one and the call refuses rather than guessing.
-- **Coordinates** (`x`, `y`), for `click`, `scroll` and `drag`, in desktop
-  pixels. `relative: true` reads them as an offset from the target window's
-  origin instead. Screenshot metadata carries the scale to convert with.
+- **Coordinates** (`x`, `y`) for `click`, `scroll` and `drag`, in desktop
+  pixels; `relative: true` reads them as an offset from the target window's
+  origin instead.
 
-`click` on an element that exposes an AT-SPI click action invokes the action
-first and only falls back to the pointer; the result says which happened. That
-is why clicking by index is more reliable than clicking a pixel — it does not
-depend on the window being unobscured.
+Clicking by index beats clicking a pixel: on an element that exposes an AT-SPI
+click action, `click` invokes the action and never moves the pointer, so it
+does not depend on the window being unobscured. The result says which path ran.
 
 ## The four things that look like bugs
 
 **Element indices die when the application restarts.** They are positions in
-one snapshot of one process's tree. After a relaunch, a crash, or anything
-that replaces the process, call `get_app_state` or `wait_for` again before
-using an index. An index used across a restart does not error — it points at
-whatever now occupies that position.
+one snapshot of one process's tree. After a relaunch or a crash, call
+`get_app_state` or `wait_for` again. An index used across a restart does not
+error — it points at whatever now sits in that position.
 
-**One process at a time holds the input lock.** It is machine-wide: two
-servers driving one desktop would interleave their pointer and key events, so
-the second answers `ok=false` naming the holder's pid. That is a refusal, not
-a failure to work around. Stop and say who holds it.
+**One process at a time holds the input lock.** It is machine-wide, because
+two servers driving one desktop would interleave their pointer and key events.
+The second answers `ok=false` naming the holder's pid. That is a refusal to
+report, not something to work around.
 
 **Hyprland cannot give a tiled window an exact geometry.** `move_window` and
 `resize_window` refuse a tiled window before dispatching anything: a pixel move
 is ignored outright, and a pixel resize moves the layout split, resizing the
 neighbors instead of the target. The refusal names the way out —
-`set_window_floating` with `floating: true`, then the move or resize, then
+`set_window_floating` with `floating: true`, the move or resize, then
 `floating: false` to put the layout back.
 
-**A screenshot denied with response 2** is usually the Hyprland portal started
-without `grim` on its `PATH`, not a permission problem:
+**A screenshot denied with response 2** is the Hyprland portal started without
+`grim` on its `PATH`, not a permission problem. It is fixed by restarting
+`xdg-desktop-portal-hyprland.service` and `xdg-desktop-portal.service`.
 
-```bash
-systemctl --user restart xdg-desktop-portal-hyprland.service xdg-desktop-portal.service
-```
+## Typing and reading text
 
-## Text and typing
+`type_text` sends literal text through `wtype`, which speaks the Wayland
+virtual-keyboard protocol rather than pressing scancodes, so an accented
+character arrives as itself. `press_key` sends named keys and chords.
 
-`type_text` sends literal text through `wtype`, which is layout-safe: it
-speaks the Wayland virtual-keyboard protocol rather than pressing scancodes,
-so an accented character or a symbol arrives as itself. `press_key` sends named
-keys and chords through `ydotool`.
+**Prefer `set_value` over selecting and typing.** It uses the AT-SPI Value or
+EditableText interface and falls back to the keyboard — GrabFocus, Ctrl+A,
+type — only when the element exposes neither; the result says which ran.
+Applications built on GPUI expose no EditableText, so their fields always take
+the fallback.
 
-**Prefer `set_value` over selecting-and-typing** when a field is settable. It
-uses the AT-SPI Value or EditableText interface, and only falls back to the
-keyboard — GrabFocus, Ctrl+A, type — when the element exposes neither. The
-result says which path ran. Applications built on GPUI and accesskit expose no
-EditableText, so their text fields always take the fallback.
+**A clipboard chord destroys the user's clipboard.** `ctrl+c` and `ctrl+v`
+work, and whatever a person had copied is gone. Reach for `set_value` or
+`type_text` unless the clipboard is the point.
 
-**A clipboard chord overwrites the user's clipboard.** `ctrl+c` and `ctrl+v`
-work, and they destroy whatever a person had copied. Reach for `set_value` or
-`type_text` instead unless the clipboard is the point.
+To read text back, use the tree: a text node carries `content`, `caret_offset`
+and `selections`, and `selection_error` when the selection could not be read at
+all, which is a different answer from nothing being selected.
 
 ## Screenshots
 
 `screenshot` returns a bounded image by default, because an unbounded desktop
 capture is a large payload for what is usually a small question. Ask for more
-deliberately: `max_width` / `max_height` to raise the ceiling, `max_bytes` to
-raise the byte cap, `region` to crop, `format: "jpeg"` with `quality` when the
-content is photographic. Pass a window selector to capture one window, and
+deliberately: `max_width` / `max_height` raise the ceiling, `max_bytes` the
+byte cap, `region` crops, and `format: "jpeg"` with `quality` suits
+photographic content. Pass a window selector to capture one window, and
 `raise_window` when it may be behind another.
 
 `get_app_state` takes `include_screenshot` when both the tree and the picture
 are wanted in one call.
-
-## Reading text out of an element
-
-The tree carries a node's name and text. What it does not carry is the
-selection — where the caret is, and what is highlighted. That comes from the
-AT-SPI `Text` interface on the a11y bus, which is a different bus from the
-session one:
-
-```bash
-gdbus call --address "unix:path=$XDG_RUNTIME_DIR/at-spi/bus_0" \
-  --dest <name> --object-path <path> \
-  --method org.a11y.atspi.Text.GetSelection 0
-```
-
-`busctl --user` cannot see it. The address is the one `doctor` reports.
-
-## Debugging by hand
-
-`computer-use-hyprland` is also a command. `doctor`, `windows`, `apps`,
-`state [APP_NAME]` and `screenshot` run the same machinery outside MCP, and
-`abs-test X Y` clicks a desktop coordinate through the uinput pointer and
-prints where it actually landed after clamping — the fastest way to tell a
-coordinate problem from an input-backend one.
-
-One trap when reaching for `hyprctl` directly: on a Hyprland configured in
-Lua, `hyprctl dispatch movewindowpixel …` is rejected, because the Lua config
-wraps every dispatch argument as `hl.dispatch(...)` and only the `hl.dsp.*`
-table forms parse. The server tries both and needs no help; a hand-run does.
-The working forms are:
-
-```
-hl.dsp.focus({ window = "address:0x…" })
-hl.dsp.window.move({ window = "address:0x…", exact = true, x = …, y = … })
-hl.dsp.window.resize({ window = "address:0x…", exact = true, x = …, y = … })
-hl.dsp.window.float({ window = "address:0x…", action = "set" })
-```
-
-`float` with no argument toggles the *focused* window, which is rarely the one
-meant. And `hyprctl eval` prints only "ok", so a name is listed by making it
-an error: `error(table.concat(keys, ","))`.
 
 ## Applications that expose no tree
 
