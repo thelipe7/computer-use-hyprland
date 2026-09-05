@@ -1,0 +1,42 @@
+version: 2
+updates:
+  # Grouped for a short review queue: one pull request for the week's minor and
+  # patch bumps, and a separate one for each major, the only kind worth reading
+  # individually. Security fixes ignore all of this and arrive immediately.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    # The cooldown is the gap in which a compromised release is noticed and
+    # yanked before a bot proposes merging it. Security updates ignore it and
+    # still arrive immediately.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    # The Conventional Commit subject `commits.yml` asks every commit for, bots
+    # included. Dependabot's default is to infer the style from recent history,
+    # which is a guess.
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      cargo-minor-and-patch:
+        update-types: [minor, patch]
+  # Two directories, because `/` means `.github/workflows` and nothing else.
+  # The composite action holds pins of its own and has to be named to be
+  # watched.
+  - package-ecosystem: github-actions
+    directories:
+      - "/"
+      - "/.github/actions/rust"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      actions:
+        patterns: ["*"]
