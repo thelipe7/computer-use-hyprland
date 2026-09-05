@@ -1,17 +1,17 @@
 use crate::diagnostics::hydrate_session_bus_env;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use atspi::{
+    CoordType, ObjectRef, ObjectRefOwned, StateSet,
     proxy::{
         accessible::{AccessibleProxy, ObjectRefExt},
         proxy_ext::ProxyExt,
         text::TextProxy,
     },
-    CoordType, ObjectRef, ObjectRefOwned, StateSet,
 };
 // Direct dependency (p2p feature off) — see Cargo.toml for why we bypass
 // atspi's "connection" re-export.
 use atspi_connection::AccessibilityConnection;
-use futures_util::{stream, StreamExt};
+use futures_util::{StreamExt, stream};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::{collections::VecDeque, future::Future, time::Duration};
@@ -362,10 +362,10 @@ async fn root_pids(conn: &zbus::Connection, roots: &[ObjectRefOwned]) -> Vec<u32
     };
     let mut pids: Vec<u32> = Vec::new();
     for object_ref in roots {
-        if let Some(pid) = object_ref_pid(Some(&dbus), object_ref).await {
-            if !pids.contains(&pid) {
-                pids.push(pid);
-            }
+        if let Some(pid) = object_ref_pid(Some(&dbus), object_ref).await
+            && !pids.contains(&pid)
+        {
+            pids.push(pid);
         }
     }
     pids
@@ -480,15 +480,15 @@ pub fn is_stale_object_error(error: &anyhow::Error) -> bool {
         "was not provided by any .service files",
     ];
     error.chain().any(|cause| {
-        if let Some(zbus::Error::FDO(fdo)) = cause.downcast_ref::<zbus::Error>() {
-            if matches!(
+        if let Some(zbus::Error::FDO(fdo)) = cause.downcast_ref::<zbus::Error>()
+            && matches!(
                 **fdo,
                 zbus::fdo::Error::ServiceUnknown(_)
                     | zbus::fdo::Error::UnknownObject(_)
                     | zbus::fdo::Error::NameHasNoOwner(_)
-            ) {
-                return true;
-            }
+            )
+        {
+            return true;
         }
         let text = cause.to_string();
         STALE_MARKERS.iter().any(|marker| text.contains(marker))
@@ -536,18 +536,16 @@ pub async fn set_element_value(object_ref_id: &str, value: &str) -> Result<Value
         .with_context(|| format!("failed to open AT-SPI object {object_ref_id}"))?;
     let proxies = proxy.proxies().await?;
 
-    if let Ok(numeric_value) = value.parse::<f64>() {
-        if let Ok(value_proxy) = proxies.value().await {
-            value_proxy
-                .set_current_value(numeric_value)
-                .await
-                .with_context(|| {
-                    format!("failed to set AT-SPI numeric value to {numeric_value}")
-                })?;
-            return Ok(ValueSetInvocation::Numeric {
-                value: numeric_value,
-            });
-        }
+    if let Ok(numeric_value) = value.parse::<f64>()
+        && let Ok(value_proxy) = proxies.value().await
+    {
+        value_proxy
+            .set_current_value(numeric_value)
+            .await
+            .with_context(|| format!("failed to set AT-SPI numeric value to {numeric_value}"))?;
+        return Ok(ValueSetInvocation::Numeric {
+            value: numeric_value,
+        });
     }
 
     if let Ok(editable_text) = proxies.editable_text().await {
@@ -764,10 +762,10 @@ async fn read_node(
 }
 
 async fn role_name(proxy: &AccessibleProxy<'_>) -> String {
-    if let Ok(role) = proxy.get_role_name().await {
-        if !role.trim().is_empty() {
-            return role;
-        }
+    if let Ok(role) = proxy.get_role_name().await
+        && !role.trim().is_empty()
+    {
+        return role;
     }
     proxy
         .get_role()
@@ -956,10 +954,10 @@ fn select_action_index(actions: &[atspi::Action], requested_action: Option<&str>
             return Ok(index as i32);
         }
 
-        if let Ok(index) = requested_action.parse::<usize>() {
-            if index < actions.len() {
-                return Ok(index as i32);
-            }
+        if let Ok(index) = requested_action.parse::<usize>()
+            && index < actions.len()
+        {
+            return Ok(index as i32);
         }
 
         return Err(anyhow!(
@@ -1143,11 +1141,7 @@ mod tests {
                 let calls = calls.clone();
                 async move {
                     calls.lock().unwrap().push(index);
-                    if index == 1 {
-                        Err(())
-                    } else {
-                        Ok(index)
-                    }
+                    if index == 1 { Err(()) } else { Ok(index) }
                 }
             }
         })

@@ -19,24 +19,24 @@ mod ydotool;
 
 pub(crate) mod atspi_tree {
     pub(crate) use crate::atspi_tree_impl::{
-        element_states, focused_element_summary, grab_focus, is_stale_object_error,
-        list_accessible_apps, perform_action, set_element_value, snapshot_limits, snapshot_tree,
         AccessibilityAction, AccessibilityNode, AccessibleAppSummary, Bounds,
-        FocusedElementSummary, ValueSetInvocation,
+        FocusedElementSummary, ValueSetInvocation, element_states, focused_element_summary,
+        grab_focus, is_stale_object_error, list_accessible_apps, perform_action, set_element_value,
+        snapshot_limits, snapshot_tree,
     };
 }
 
 pub(crate) mod diagnostics {
     pub(crate) use crate::diagnostics_impl::{
-        doctor_report, hydrate_session_bus_env, setup_accessibility_report, user_id,
-        wtype_compatible_wayland_desktop, DoctorReport, ReadinessReport, SetupReport,
+        DoctorReport, ReadinessReport, SetupReport, doctor_report, hydrate_session_bus_env,
+        setup_accessibility_report, user_id, wtype_compatible_wayland_desktop,
     };
 }
 
 pub(crate) mod screenshot {
     pub(crate) use crate::screenshot_impl::{
-        capture_screenshot, capture_screenshot_raw, prepare_screenshot_payload,
         RawScreenshotCapture, ScreenshotCapture, ScreenshotOutputFormat, ScreenshotPayloadOptions,
+        capture_screenshot, capture_screenshot_raw, prepare_screenshot_payload,
     };
 }
 

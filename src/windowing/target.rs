@@ -1,8 +1,8 @@
 use crate::windowing::registry::{self, WINDOW_PERMISSION_HINT};
 use crate::windowing::types::{WindowFocusResult, WindowInfo, WindowTarget};
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::future::Future;
-use tokio::time::{sleep_until, timeout_at, Duration, Instant};
+use tokio::time::{Duration, Instant, sleep_until, timeout_at};
 
 const FOCUS_VERIFY_TIMEOUT: Duration = Duration::from_secs(1);
 const FOCUS_VERIFY_DELAY: Duration = Duration::from_millis(50);
@@ -17,7 +17,9 @@ pub async fn focused_window() -> Result<Option<WindowInfo>> {
 
 pub async fn focus_window_target(target: &WindowTarget) -> Result<WindowFocusResult> {
     if !target.has_target() {
-        bail!("Pass window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd to target a window.");
+        bail!(
+            "Pass window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd to target a window."
+        );
     }
 
     let windows = list_windows().await?;
@@ -174,7 +176,9 @@ pub fn resolve_window_target<'a>(
         bail!("No window title contained {title}.");
     }
 
-    bail!("Pass window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd to target a window.");
+    bail!(
+        "Pass window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd to target a window."
+    );
 }
 
 fn resolve_window_id_target<'a>(
@@ -273,10 +277,10 @@ fn window_matches_terminal_target(window: &WindowInfo, target: &WindowTarget) ->
         return false;
     };
 
-    if let Some(tty) = normalized_target(target.tty.as_deref()) {
-        if !tty_matches(&terminal.tty, &tty) {
-            return false;
-        }
+    if let Some(tty) = normalized_target(target.tty.as_deref())
+        && !tty_matches(&terminal.tty, &tty)
+    {
+        return false;
     }
 
     if let Some(pid) = target.terminal_pid {

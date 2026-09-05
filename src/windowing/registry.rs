@@ -1,6 +1,6 @@
 use crate::windowing::backends::hyprland;
 use crate::windowing::types::{WindowInfo, WindowOcclusion};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 pub use hyprland::HYPRLAND_BACKEND;
 

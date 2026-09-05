@@ -332,7 +332,7 @@ fn path_to_string(path: PathBuf) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::windowing::{WindowBounds, HYPRLAND_BACKEND};
+    use crate::windowing::{HYPRLAND_BACKEND, WindowBounds};
 
     fn terminal_window(window_id: u64, pid: u32) -> WindowInfo {
         WindowInfo {

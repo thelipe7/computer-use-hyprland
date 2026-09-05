@@ -2,7 +2,7 @@ use crate::command_runner;
 use crate::terminal::enrich_terminal_windows;
 use crate::windowing::registry::BackendProbe;
 use crate::windowing::types::{WindowBounds, WindowInfo, WindowOcclusion};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::fs;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -498,11 +498,7 @@ pub async fn set_floating(window_id: u64, floating: bool) -> Result<String> {
 }
 
 fn describe_floating(floating: bool) -> &'static str {
-    if floating {
-        "floating"
-    } else {
-        "tiled"
-    }
+    if floating { "floating" } else { "tiled" }
 }
 
 /// The Lua float form. The window is named explicitly: `hl.dsp.window.float()`
@@ -664,10 +660,8 @@ fn hyprctl_output(args: &[&str]) -> std::io::Result<std::process::Output> {
     let has_signature = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
         .ok()
         .is_some_and(|value| !value.trim().is_empty());
-    if !has_signature {
-        if let Some(signature) = infer_hyprland_instance_signature() {
-            command.args(["-i", &signature]);
-        }
+    if !has_signature && let Some(signature) = infer_hyprland_instance_signature() {
+        command.args(["-i", &signature]);
     }
     command.args(args).output()
 }
@@ -677,10 +671,8 @@ async fn hyprctl_output_async(args: &[&str]) -> Result<std::process::Output> {
     let has_signature = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
         .ok()
         .is_some_and(|value| !value.trim().is_empty());
-    if !has_signature {
-        if let Some(signature) = infer_hyprland_instance_signature() {
-            command.args(["-i", &signature]);
-        }
+    if !has_signature && let Some(signature) = infer_hyprland_instance_signature() {
+        command.args(["-i", &signature]);
     }
     command.args(args);
     command_runner::output(command, "run hyprctl").await

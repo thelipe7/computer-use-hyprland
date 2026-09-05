@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::{
     io::{self, Read},
     os::{fd::AsRawFd, unix::process::CommandExt as _},
@@ -618,9 +618,11 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("timed out after 2000 ms while trying to run blocking process tree"));
+        assert!(
+            error
+                .to_string()
+                .contains("timed out after 2000 ms while trying to run blocking process tree")
+        );
         assert!(started.elapsed() < Duration::from_secs(4));
         let leader = fs::read_to_string(&leader_path)
             .expect("leader should record its pid")
@@ -649,10 +651,10 @@ mod tests {
 
     async fn wait_for_pid(path: &PathBuf) -> u32 {
         for _ in 0..100 {
-            if let Ok(value) = fs::read_to_string(path) {
-                if let Ok(pid) = value.parse() {
-                    return pid;
-                }
+            if let Ok(value) = fs::read_to_string(path)
+                && let Ok(pid) = value.parse()
+            {
+                return pid;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }

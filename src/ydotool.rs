@@ -185,11 +185,11 @@ fn cached_result_or_probe<K: PartialEq, V: Clone>(
     let Ok(mut cached) = cache.lock() else {
         return probe();
     };
-    if let Some(cached) = cached.as_ref() {
-        if cached.key == key && (cached.result.is_ok() || cached.checked_at.elapsed() < failure_ttl)
-        {
-            return cached.result.clone();
-        }
+    if let Some(cached) = cached.as_ref()
+        && cached.key == key
+        && (cached.result.is_ok() || cached.checked_at.elapsed() < failure_ttl)
+    {
+        return cached.result.clone();
     }
     let result = probe();
     *cached = Some(CachedProbe {
@@ -490,8 +490,8 @@ pub(crate) fn cli_error(stderr: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Barrier,
+        atomic::{AtomicUsize, Ordering},
     };
     use std::thread;
 

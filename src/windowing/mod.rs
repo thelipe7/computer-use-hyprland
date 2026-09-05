@@ -15,7 +15,7 @@ pub use types::{WindowBounds, WindowFocusResult, WindowInfo, WindowOcclusion, Wi
 
 #[cfg(test)]
 mod tests {
-    use super::backends::hyprland::{parse_hyprland_clients, HYPRLAND_BACKEND};
+    use super::backends::hyprland::{HYPRLAND_BACKEND, parse_hyprland_clients};
     use super::target::ensure_backend_can_focus_target;
     use super::*;
     use crate::terminal::{TerminalProcess, TerminalWindowContext};
@@ -80,45 +80,59 @@ mod tests {
     #[test]
     fn target_reports_when_any_selector_is_present() {
         assert!(!WindowTarget::default().has_target());
-        assert!(WindowTarget {
-            title: Some("Ghostty".to_string()),
-            ..Default::default()
-        }
-        .has_target());
-        assert!(WindowTarget {
-            tty: Some("/dev/pts/1".to_string()),
-            ..Default::default()
-        }
-        .has_target());
+        assert!(
+            WindowTarget {
+                title: Some("Ghostty".to_string()),
+                ..Default::default()
+            }
+            .has_target()
+        );
+        assert!(
+            WindowTarget {
+                tty: Some("/dev/pts/1".to_string()),
+                ..Default::default()
+            }
+            .has_target()
+        );
     }
 
     #[test]
     fn title_pid_and_window_id_targets_require_exact_focus() {
-        assert!(WindowTarget {
-            title: Some("Ghostty".to_string()),
-            ..Default::default()
-        }
-        .requires_exact_focus());
-        assert!(WindowTarget {
-            pid: Some(123),
-            ..Default::default()
-        }
-        .requires_exact_focus());
-        assert!(WindowTarget {
-            window_id: Some(123),
-            ..Default::default()
-        }
-        .requires_exact_focus());
-        assert!(WindowTarget {
-            terminal_command: Some("codex".to_string()),
-            ..Default::default()
-        }
-        .requires_exact_focus());
-        assert!(!WindowTarget {
-            app_id: Some("com.mitchellh.ghostty.desktop".to_string()),
-            ..Default::default()
-        }
-        .requires_exact_focus());
+        assert!(
+            WindowTarget {
+                title: Some("Ghostty".to_string()),
+                ..Default::default()
+            }
+            .requires_exact_focus()
+        );
+        assert!(
+            WindowTarget {
+                pid: Some(123),
+                ..Default::default()
+            }
+            .requires_exact_focus()
+        );
+        assert!(
+            WindowTarget {
+                window_id: Some(123),
+                ..Default::default()
+            }
+            .requires_exact_focus()
+        );
+        assert!(
+            WindowTarget {
+                terminal_command: Some("codex".to_string()),
+                ..Default::default()
+            }
+            .requires_exact_focus()
+        );
+        assert!(
+            !WindowTarget {
+                app_id: Some("com.mitchellh.ghostty.desktop".to_string()),
+                ..Default::default()
+            }
+            .requires_exact_focus()
+        );
     }
 
     #[test]

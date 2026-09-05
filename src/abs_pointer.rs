@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use evdev::{
-    uinput::VirtualDevice, AbsInfo, AbsoluteAxisCode, AttributeSet, EventType, InputEvent, KeyCode,
-    PropType, UinputAbsSetup,
+    AbsInfo, AbsoluteAxisCode, AttributeSet, EventType, InputEvent, KeyCode, PropType,
+    UinputAbsSetup, uinput::VirtualDevice,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
