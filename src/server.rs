@@ -149,7 +149,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "setup_accessibility",
-        description = "Enable GNOME accessibility through gsettings so Linux Computer Use can read AT-SPI trees.",
+        description = "Turn AT-SPI accessibility on through gsettings so the accessibility tree can be read. Only needed when doctor reports at_spi_enabled or toolkit_accessibility as failing; it writes session settings, so leave it alone when they already pass.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1513,7 +1513,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "drag",
-        description = "Drag from one point to another using pixel coordinates.",
+        description = "Drag from one point to another. Each end is either a desktop coordinate pair, a window-relative pair (with a window target and `relative: true`), or the centre of an element (`start_element_index`/`end_element_index` from the latest get_app_state tree). A window target is raised and focused first, so the drag lands on the intended app rather than whatever is stacked on top at that pixel. The result reports the desktop point each end resolved to.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1543,7 +1543,18 @@ impl ComputerUseLinux {
                 });
             }
         };
-        let mut notes = Vec::new();
+        let (start, end, mut notes) = match self.resolve_drag_endpoints(&params).await {
+            Ok(resolved) => resolved,
+            Err(message) => {
+                return Json(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "drag".to_string(),
+                    message,
+                    received: Some(serde_json::json!(params)),
+                });
+            }
+        };
         if !held_modifiers.is_empty() {
             if let Err(message) = run_ydotool(&modifier_hold_args(&held_modifiers, true)).await {
                 return Json(ActionOutput {
@@ -1556,7 +1567,7 @@ impl ComputerUseLinux {
             }
         }
         let modifiers = params.modifiers.join("+");
-        let output = self.drag_inner(params).await;
+        let output = self.drag_inner(params, start, end).await;
         if !held_modifiers.is_empty() {
             notes.push(
                 match run_ydotool(&modifier_hold_args(&held_modifiers, false)).await {
@@ -1574,7 +1585,109 @@ impl ComputerUseLinux {
         Json(with_notes(output.0, notes))
     }
 
-    async fn drag_inner(&self, params: DragParams) -> Json<ActionOutput> {
+    /// Resolve both drag ends to desktop coordinates, focusing the target
+    /// window first when one was given. Returns a note per end saying how it
+    /// resolved, so a drag that lands somewhere unexpected can be read back
+    /// from the result instead of guessed at.
+    async fn resolve_drag_endpoints(
+        &self,
+        params: &DragParams,
+    ) -> std::result::Result<((i32, i32), (i32, i32), Vec<String>), String> {
+        let window_target = params.window_target();
+        let relative = params.relative == Some(true);
+        if relative && window_target.is_none() {
+            return Err("Relative drag coordinates require a window target.".to_string());
+        }
+        let mut origin = (0, 0);
+        if let Some(target) = window_target {
+            let focus = self.focus_target_for_input(&target).await?;
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            if relative {
+                let focus = focus.as_ref().ok_or_else(|| {
+                    "Relative drag coordinates require verified target-window focus.".to_string()
+                })?;
+                let (x, y, _, _) = self
+                    .focused_window_coordinate_map(focus)
+                    .await?
+                    .capture_rect;
+                origin = (x, y);
+            }
+        }
+        let offset = self.current_bounds().await.offset();
+        let (start, start_note) = self.drag_endpoint(
+            "start",
+            params.start_element_index,
+            params.start_x,
+            params.start_y,
+            origin,
+            offset,
+        )?;
+        let (end, end_note) = self.drag_endpoint(
+            "end",
+            params.end_element_index,
+            params.end_x,
+            params.end_y,
+            origin,
+            offset,
+        )?;
+        Ok((start, end, vec![start_note, end_note]))
+    }
+
+    fn drag_endpoint(
+        &self,
+        label: &str,
+        element_index: Option<u32>,
+        x: Option<i32>,
+        y: Option<i32>,
+        origin: (i32, i32),
+        offset: Option<(i32, i32)>,
+    ) -> std::result::Result<((i32, i32), String), String> {
+        if let Some(element_index) = element_index {
+            if x.is_some() || y.is_some() {
+                return Err(format!(
+                    "Give either {label}_element_index or {label}_x/{label}_y, not both."
+                ));
+            }
+            let (px, py) = self
+                .center_for_cached_node(element_index, offset)
+                .ok_or_else(|| {
+                    format!(
+                        "No bounds cached for {label}_element_index {element_index}. Call get_app_state first and choose a node with positive width and height."
+                    )
+                })?;
+            let note = match offset {
+                Some((dx, dy)) => format!(
+                    "{label}_element_index {element_index} resolved to desktop point ({px}, {py}): the tree's window-relative bounds were offset by the window origin ({dx}, {dy})."
+                ),
+                None => format!(
+                    "{label}_element_index {element_index} resolved to desktop point ({px}, {py})."
+                ),
+            };
+            return Ok(((px, py), note));
+        }
+        let (Some(x), Some(y)) = (x, y) else {
+            return Err(format!(
+                "A drag needs {label}_x and {label}_y, or {label}_element_index."
+            ));
+        };
+        let point = (x + origin.0, y + origin.1);
+        let note = if origin == (0, 0) {
+            format!("{label} resolved to desktop point ({x}, {y}).")
+        } else {
+            format!(
+                "{label} resolved to desktop point ({}, {}): window-relative ({x}, {y}) offset by the window origin ({}, {}).",
+                point.0, point.1, origin.0, origin.1
+            )
+        };
+        Ok((point, note))
+    }
+
+    async fn drag_inner(
+        &self,
+        params: DragParams,
+        start: (i32, i32),
+        end: (i32, i32),
+    ) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params));
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         // Preferred backend: the uinput absolute pointer (accurate landing).
@@ -1583,12 +1696,8 @@ impl ComputerUseLinux {
             let dragged = tokio::task::spawn_blocking(move || {
                 if let Ok(mut guard) = abs_pointer.lock() {
                     guard.as_mut().map(|p| {
-                        p.drag(
-                            (params.start_x, params.start_y),
-                            (params.end_x, params.end_y),
-                            crate::abs_pointer::PointerButton::Left,
-                        )
-                        .is_ok()
+                        p.drag(start, end, crate::abs_pointer::PointerButton::Left)
+                            .is_ok()
                     })
                 } else {
                     None
@@ -1608,7 +1717,7 @@ impl ComputerUseLinux {
             }
         }
         let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
-            run_ydotool_drag(params.start_x, params.start_y, params.end_x, params.end_y).await
+            run_ydotool_drag(start.0, start.1, end.0, end.1).await
         })
         .await;
         let _input_guard = input_guard;
@@ -1922,8 +2031,8 @@ impl ComputerUseLinux {
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
-    version = "0.5.0",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After click, drag, perform_action, press_key, and type_text, results append focused-element feedback from AT-SPI (role, name, editable, states) and warn when no editable element holds focus after typing — treat that warning as the input not landing; element clicks and actions also report the element's states before -> after when they changed. When an element operation answers that the cached accessibility tree is stale, call get_app_state again before retrying. wait_for polls until an element selector, a window title substring, or a focused window holds and returns the element with its index in a freshly cached tree. pointer_position reports the pointer's desktop coordinates on Hyprland and X11. The first input action of this process takes a machine-wide session lock; another server process gets ok=false naming the holder's pid. When COMPUTER_USE_LINUX_ALLOWED_APPS is set, input tools refuse windows matching none of its app_id/wm_class/title patterns. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension, Hyprland, or X11 backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
+    version = "0.6.0",
+    instructions = "Begin every turn that uses Computer Use by calling get_app_state. This server drives one desktop: Hyprland on Wayland. Windows come from hyprctl, the accessibility tree from AT-SPI, screenshots from the XDG Screenshot portal, and every input event from uinput -- an absolute pointer device for click, scroll and drag, wtype for literal text, and ydotool for keys and chords. There is no RemoteDesktop portal on Hyprland and this build does not look for one. Use list_windows/focused_window before targeted keyboard input. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. A window-targeted screenshot raises the window first; with raise_window=false the caption lists occluded_by so overlapping pixels are not mistaken for the target's own. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action and set_value can also use semantic role/name/text/states selectors when the target is unique. A plain left click on an element that exposes an AT-SPI click action invokes that action and never moves the pointer; the message says which path ran. click, scroll and drag all accept the same window target and relative coordinates, and drag additionally accepts start_element_index/end_element_index; each reports the desktop point every end resolved to. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After click, drag, perform_action, press_key and type_text, results append focused-element feedback from AT-SPI (role, name, editable, states) and warn when no editable element holds focus after typing -- treat that warning as the input not landing; element clicks and actions also report the element's states before -> after when they changed. When an element operation answers that the cached accessibility tree is stale, call get_app_state again before retrying. wait_for polls until an element selector, a window title substring, or a focused window holds and returns the element with its index in a freshly cached tree. pointer_position reports the pointer's desktop coordinates. Hyprland cannot give a tiled window an exact geometry, so move_window and resize_window refuse one without dispatching anything; call set_window_floating with floating=true, retry, then set_window_floating with floating=false to restore the layout. The first input action of this process takes a machine-wide session lock; another server process gets ok=false naming the holder's pid. When COMPUTER_USE_LINUX_ALLOWED_APPS is set, input tools refuse windows matching none of its app_id/wm_class/title patterns. Screenshot, click and input results warn when the target window or coordinate is partially or fully off-screen. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
 )]
 impl ServerHandler for ComputerUseLinux {}
 
@@ -2974,14 +3083,71 @@ impl ScrollParams {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 struct DragParams {
-    start_x: i32,
-    start_y: i32,
-    end_x: i32,
-    end_y: i32,
+    /// Drag origin in desktop pixels, or window-relative with a window target
+    /// and `relative: true`. Omit when `start_element_index` names the origin.
+    #[serde(default)]
+    start_x: Option<i32>,
+    #[serde(default)]
+    start_y: Option<i32>,
+    /// Drag destination, in the same space as the origin. Omit when
+    /// `end_element_index` names it.
+    #[serde(default)]
+    end_x: Option<i32>,
+    #[serde(default)]
+    end_y: Option<i32>,
+    /// Drag from the centre of this element, from the latest get_app_state
+    /// tree, instead of `start_x`/`start_y`.
+    #[serde(default)]
+    start_element_index: Option<u32>,
+    /// Drag to the centre of this element instead of `end_x`/`end_y`.
+    #[serde(default)]
+    end_element_index: Option<u32>,
     /// Modifier keys held around the drag (ctrl/alt/shift/meta, the press_key
     /// names).
     #[serde(default)]
     modifiers: Vec<String>,
+    /// Interpret the coordinates as relative to the targeted window's top-left
+    /// corner, the same space as a window-cropped `screenshot`. Requires a
+    /// window target.
+    #[serde(default)]
+    relative: Option<bool>,
+    // Optional window target: the window is raised/focused before the drag, so
+    // it lands on the intended app rather than whatever is stacked on top.
+    #[serde(default)]
+    window_id: Option<u64>,
+    #[serde(default)]
+    pid: Option<u32>,
+    #[serde(default)]
+    app_id: Option<String>,
+    #[serde(default)]
+    wm_class: Option<String>,
+    #[serde(default)]
+    window_title: Option<String>,
+}
+
+impl DragParams {
+    /// A window target if any window-identifying field was supplied.
+    fn window_target(&self) -> Option<WindowTarget> {
+        if self.window_id.is_none()
+            && self.pid.is_none()
+            && self.app_id.is_none()
+            && self.wm_class.is_none()
+            && self.window_title.is_none()
+        {
+            return None;
+        }
+        Some(WindowTarget {
+            window_id: self.window_id,
+            pid: self.pid,
+            tty: None,
+            terminal_pid: None,
+            terminal_command: None,
+            terminal_cwd: None,
+            app_id: self.app_id.clone(),
+            wm_class: self.wm_class.clone(),
+            title: self.window_title.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
