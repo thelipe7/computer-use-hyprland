@@ -402,7 +402,7 @@ pub async fn move_window(window_id: u64, x: i32, y: i32) -> Result<String> {
         Some(layout) => layout.unmap_point([x, y]),
         None => [x, y],
     };
-    let before = query_client(window_id).await?;
+    refuse_if_tiled(window_id, &query_client(window_id).await?, "move")?;
     let dispatcher = run_dispatch_with_fallback(
         &lua_move_dispatch(window_id, target),
         &move_window_dispatch(window_id, target),
@@ -411,9 +411,6 @@ pub async fn move_window(window_id: u64, x: i32, y: i32) -> Result<String> {
     let after = wait_for_client(window_id, |client| client.at == Some(target)).await?;
     if after.at == Some(target) {
         return Ok(format!("Moved window to ({x}, {y}) via {dispatcher}."));
-    }
-    if after.at == before.at {
-        refuse_if_tiled(window_id, &before, dispatcher)?;
     }
     Ok(format!(
         "Requested move to ({x}, {y}) via {dispatcher}; Hyprland reported global position {}.",
@@ -430,7 +427,7 @@ pub async fn resize_window(window_id: u64, width: i32, height: i32) -> Result<St
         None => [width, height],
     };
     let target_size = [target[0].max(1) as u32, target[1].max(1) as u32];
-    let before = query_client(window_id).await?;
+    refuse_if_tiled(window_id, &query_client(window_id).await?, "resize")?;
     let dispatcher = run_dispatch_with_fallback(
         &lua_resize_dispatch(window_id, target),
         &resize_window_dispatch(window_id, target),
@@ -444,9 +441,6 @@ pub async fn resize_window(window_id: u64, width: i32, height: i32) -> Result<St
         return Ok(format!(
             "Resized window to {width}x{height} via {dispatcher}."
         ));
-    }
-    if after.size == before.size {
-        refuse_if_tiled(window_id, &before, dispatcher)?;
     }
     Ok(format!(
         "Requested resize to {width}x{height} via {dispatcher}; Hyprland reported global size {}.",
@@ -478,13 +472,57 @@ fn lua_resize_dispatch(window_id: u64, [width, height]: [i32; 2]) -> String {
     )
 }
 
-/// The Lua float form. The window is named explicitly: `hl.dsp.window.float()`
-/// without arguments toggles the focused window instead.
-fn lua_float_dispatch(window_id: u64) -> String {
-    format!(
-        "hl.dsp.window.float({{ window = \"{}\", action = \"set\" }})",
-        window_address(window_id)
+/// Float or tile a window. `move_window` and `resize_window` refuse a tiled
+/// window, so this is how a caller acts on that refusal, and how it restores
+/// the layout afterwards.
+pub async fn set_floating(window_id: u64, floating: bool) -> Result<String> {
+    let state = describe_floating(floating);
+    if query_client(window_id).await?.floating == Some(floating) {
+        return Ok(format!("Window 0x{window_id:x} is already {state}."));
+    }
+    let dispatcher = run_dispatch_with_fallback(
+        &lua_float_dispatch(window_id, floating),
+        &float_window_dispatch(window_id, floating),
     )
+    .await?;
+    let after = wait_for_client(window_id, |client| client.floating == Some(floating)).await?;
+    if after.floating != Some(floating) {
+        bail!(
+            "Requested {state} for window 0x{window_id:x} via {dispatcher}, but Hyprland still reports it {}.",
+            describe_floating(!floating)
+        );
+    }
+    Ok(format!(
+        "Window 0x{window_id:x} is now {state} via {dispatcher}."
+    ))
+}
+
+fn describe_floating(floating: bool) -> &'static str {
+    if floating {
+        "floating"
+    } else {
+        "tiled"
+    }
+}
+
+/// The Lua float form. The window is named explicitly: `hl.dsp.window.float()`
+/// without arguments acts on the focused window instead.
+fn lua_float_dispatch(window_id: u64, floating: bool) -> String {
+    format!(
+        "hl.dsp.window.float({{ window = \"{}\", action = \"{}\" }})",
+        window_address(window_id),
+        if floating { "set" } else { "unset" }
+    )
+}
+
+/// `hyprctl dispatch setfloating|settiled address:0x<hex>`, the pre-0.55 form
+/// kept as the fallback.
+fn float_window_dispatch(window_id: u64, floating: bool) -> [String; 3] {
+    [
+        "dispatch".to_string(),
+        if floating { "setfloating" } else { "settiled" }.to_string(),
+        window_address(window_id),
+    ]
 }
 
 /// `hyprctl dispatch movewindowpixel exact <x> <y>,address:0x<hex>`, the
@@ -508,22 +546,17 @@ fn resize_window_dispatch(window_id: u64, [width, height]: [i32; 2]) -> [String;
     ]
 }
 
-fn float_window_hint(window_id: u64) -> String {
-    format!(
-        "hyprctl dispatch '{}' (Hyprland 0.55+ Lua config) or hyprctl dispatch setfloating {} (legacy config)",
-        lua_float_dispatch(window_id),
-        window_address(window_id)
-    )
-}
-
-/// Hyprland ignores pixel moves and resizes on tiled windows, and the
-/// floating state is deliberately left alone here: the caller decides whether
-/// to float the window, so the refusal tells it how.
-fn refuse_if_tiled(window_id: u64, client: &HyprlandClient, dispatcher: &str) -> Result<()> {
+/// Hyprland cannot give a tiled window an exact geometry: it drops a pixel
+/// move outright, and turns a pixel resize into a layout-split adjustment,
+/// which resizes the *neighbouring* windows instead of honouring the request.
+/// So both are refused here, before any dispatch runs, and a refusal leaves
+/// the layout untouched. The floating state is deliberately left alone: the
+/// caller decides whether to float the window, so the refusal names the tool
+/// that does it.
+fn refuse_if_tiled(window_id: u64, client: &HyprlandClient, operation: &str) -> Result<()> {
     if client.floating == Some(false) {
         bail!(
-            "Window 0x{window_id:x} is tiled, so Hyprland ignored {dispatcher} and its bounds did not change. Floating state was left unchanged; float it first with {} and retry.",
-            float_window_hint(window_id)
+            "Window 0x{window_id:x} is tiled, so Hyprland cannot {operation} it to an exact geometry: a pixel move is ignored, and a pixel resize moves the layout split, resizing neighbouring windows instead. Nothing was dispatched and the layout is unchanged. Call set_window_floating with floating=true, retry, then set_window_floating with floating=false to tile it again."
         );
     }
     Ok(())
@@ -1016,8 +1049,28 @@ mod tests {
             "hl.dsp.window.resize({ window = \"address:0x555c37cb3770\", exact = true, x = 800, y = 600 })"
         );
         assert_eq!(
-            lua_float_dispatch(0x555c37cb3770),
+            lua_float_dispatch(0x555c37cb3770, true),
             "hl.dsp.window.float({ window = \"address:0x555c37cb3770\", action = \"set\" })"
+        );
+        assert_eq!(
+            lua_float_dispatch(0x555c37cb3770, false),
+            "hl.dsp.window.float({ window = \"address:0x555c37cb3770\", action = \"unset\" })"
+        );
+        assert_eq!(
+            float_window_dispatch(0x1234abcd, true),
+            [
+                "dispatch".to_string(),
+                "setfloating".to_string(),
+                "address:0x1234abcd".to_string(),
+            ]
+        );
+        assert_eq!(
+            float_window_dispatch(0x1234abcd, false),
+            [
+                "dispatch".to_string(),
+                "settiled".to_string(),
+                "address:0x1234abcd".to_string(),
+            ]
         );
     }
 
@@ -1038,29 +1091,21 @@ mod tests {
     }
 
     #[test]
-    fn tiled_window_is_refused_with_the_float_hint() {
-        let error = refuse_if_tiled(0x1234abcd, &client(Some(false)), "movewindowpixel")
+    fn tiled_window_is_refused_naming_the_tool_that_clears_the_refusal() {
+        let error = refuse_if_tiled(0x1234abcd, &client(Some(false)), "resize")
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("is tiled"), "{error}");
-        assert!(error.contains("movewindowpixel"), "{error}");
-        assert!(
-            error.contains(
-                "hyprctl dispatch 'hl.dsp.window.float({ window = \"address:0x1234abcd\", action = \"set\" })'"
-            ),
-            "{error}"
-        );
-        assert!(
-            error.contains("hyprctl dispatch setfloating address:0x1234abcd"),
-            "{error}"
-        );
+        assert!(error.contains("Window 0x1234abcd is tiled"), "{error}");
+        assert!(error.contains("cannot resize it"), "{error}");
+        assert!(error.contains("Nothing was dispatched"), "{error}");
+        assert!(error.contains("set_window_floating"), "{error}");
     }
 
     #[test]
     fn floating_or_unknown_windows_are_not_refused() {
-        assert!(refuse_if_tiled(0x1234abcd, &client(Some(true)), "movewindowpixel").is_ok());
-        assert!(refuse_if_tiled(0x1234abcd, &client(None), "resizewindowpixel").is_ok());
+        assert!(refuse_if_tiled(0x1234abcd, &client(Some(true)), "move").is_ok());
+        assert!(refuse_if_tiled(0x1234abcd, &client(None), "resize").is_ok());
     }
 
     #[test]
