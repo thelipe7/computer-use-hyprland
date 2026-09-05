@@ -40,6 +40,13 @@ pub(crate) mod screenshot {
     };
 }
 
+/// Run the subcommand named on the command line, or print the usage when
+/// none is. This is the whole public surface of the crate.
+///
+/// # Errors
+///
+/// Returns whatever the subcommand failed with: a desktop it could not
+/// reach, a window it could not find, an input device it could not open.
 pub async fn run_cli_from_env() -> anyhow::Result<()> {
     cli::run_from_env().await
 }

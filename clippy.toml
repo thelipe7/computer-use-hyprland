@@ -1,0 +1,16 @@
+# Clippy's own configuration: the thresholds a few lints read, and the lists
+# the `disallowed_*` lints work from.
+#
+# A test reports failure by panicking, so `unwrap` and `expect` are how a test
+# says "this must have worked". Without these two, every one of them would be
+# a finding the day `unwrap_used` is turned on.
+#
+# Mind the edge: these cover `#[test]` functions and `#[cfg(test)]` modules,
+# and nothing else. A helper outside one carries its own
+# `#[expect(clippy::unwrap_used, reason = "...")]`.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+
+# Nothing else is set, on purpose. Every other entry here would be a rule about
+# this project in particular, and the useful ones are discovered rather than
+# guessed.

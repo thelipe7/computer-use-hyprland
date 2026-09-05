@@ -34,7 +34,6 @@ use std::{
     collections::BTreeMap,
     env,
     ffi::OsString,
-    future::Future,
     os::unix::net::UnixDatagram,
     path::{Path, PathBuf},
     process::{Command, Output},
@@ -3840,6 +3839,10 @@ impl ComputerUseLinux {
         selector: &ElementSelector<'_>,
         purpose: ElementResolvePurpose,
     ) -> std::result::Result<AccessibilityNode, String> {
+        #[expect(
+            clippy::map_err_ignore,
+            reason = "the discarded error is a PoisonError holding the guard; the caller needs the retry instruction, not it"
+        )]
         let cached = self.last_nodes.lock().map_err(|_| {
             "Could not read cached accessibility nodes. Call get_app_state and retry.".to_string()
         })?;
@@ -4641,6 +4644,10 @@ struct WindowCoordinateMap {
     capture_rect: (i32, i32, u32, u32),
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "the discarded error is a TryFromIntError, whose message names no dimension; each arm below names the one that failed"
+)]
 fn clip_capture_rect(
     (x, y, width, height): (i32, i32, u32, u32),
     capture_width: u32,
@@ -5523,7 +5530,6 @@ fn looks_like_desktop_app(name: &str, command: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atspi_tree::{AccessibilityAction, Bounds};
     use crate::windowing::{HYPRLAND_BACKEND, WindowBounds};
     use std::os::unix::fs::PermissionsExt;
 
@@ -5687,11 +5693,11 @@ mod tests {
     #[test]
     fn readonly_targeted_screenshot_requires_focused_visible_window() {
         let mut window = window_info(1, Some("Target"), None, None, None);
-        assert!(ensure_readonly_screenshot_target_is_visible(&window).is_err());
+        ensure_readonly_screenshot_target_is_visible(&window).unwrap_err();
         window.focused = true;
-        assert!(ensure_readonly_screenshot_target_is_visible(&window).is_ok());
+        ensure_readonly_screenshot_target_is_visible(&window).unwrap();
         window.hidden = true;
-        assert!(ensure_readonly_screenshot_target_is_visible(&window).is_err());
+        ensure_readonly_screenshot_target_is_visible(&window).unwrap_err();
     }
 
     #[test]
@@ -7023,9 +7029,9 @@ mod tests {
             .unwrap(),
             vec!["ctrl+a".to_string(), "Delete".to_string()]
         );
-        assert!(press_key_sequence(Some("enter"), &["tab".to_string()]).is_err());
-        assert!(press_key_sequence(None, &[]).is_err());
-        assert!(press_key_sequence(Some("  "), &[]).is_err());
+        press_key_sequence(Some("enter"), &["tab".to_string()]).unwrap_err();
+        press_key_sequence(None, &[]).unwrap_err();
+        press_key_sequence(Some("  "), &[]).unwrap_err();
     }
 
     #[test]
@@ -7042,7 +7048,7 @@ mod tests {
             modifier_hold_args(&codes, false),
             vec!["key".to_string(), "29:0".to_string(), "42:0".to_string()]
         );
-        assert!(modifier_keycodes(&["hyper".to_string()]).is_err());
+        modifier_keycodes(&["hyper".to_string()]).unwrap_err();
         assert!(modifier_keycodes(&[]).unwrap().is_empty());
     }
 
@@ -7115,7 +7121,7 @@ mod tests {
             width: 0,
             height: 10,
         };
-        assert!(region_crop_rect(&empty, false, None, 1920, 1080).is_err());
+        region_crop_rect(&empty, false, None, 1920, 1080).unwrap_err();
     }
 
     #[test]

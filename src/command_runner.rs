@@ -200,7 +200,10 @@ async fn supervise_child(
     result
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a distinct half-finished piece of one spawned command, and a struct to hold them would be built at the single call site and destructured here"
+)]
 async fn supervise_command(
     mut child: Child,
     process_group: &mut ProcessGroupGuard,

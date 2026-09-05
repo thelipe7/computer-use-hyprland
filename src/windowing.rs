@@ -3,19 +3,17 @@ pub mod registry;
 pub mod target;
 pub mod types;
 
-#[allow(unused_imports)]
-pub use registry::{HYPRLAND_BACKEND, WINDOW_PERMISSION_HINT};
-#[allow(unused_imports)]
+pub use registry::HYPRLAND_BACKEND;
 pub use target::{
     focus_window_target, focused_window, list_windows, resolve_window_target,
     window_permission_hint,
 };
-#[allow(unused_imports)]
 pub use types::{WindowBounds, WindowFocusResult, WindowInfo, WindowOcclusion, WindowTarget};
 
 #[cfg(test)]
 mod tests {
-    use super::backends::hyprland::{HYPRLAND_BACKEND, parse_hyprland_clients};
+    use super::backends::hyprland::parse_hyprland_clients;
+    use super::registry::WINDOW_PERMISSION_HINT;
     use super::target::ensure_backend_can_focus_target;
     use super::*;
     use crate::terminal::{TerminalProcess, TerminalWindowContext};

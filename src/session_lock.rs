@@ -43,6 +43,10 @@ impl LockError {
 }
 
 /// Take the process-wide input lock, or say who holds it.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "the discarded error is a PoisonError holding the guard, which says nothing a caller can act on"
+)]
 pub(crate) fn acquire_input_lock() -> Result<(), String> {
     let mut held = HELD
         .lock()
@@ -95,6 +99,10 @@ pub(crate) fn acquire_at(path: &Path) -> Result<File, LockError> {
     Ok(file)
 }
 
+#[expect(
+    clippy::verbose_file_reads,
+    reason = "this reads through the caller's already-open descriptor, the one holding the lock; fs::read_to_string would open a second one"
+)]
 fn read_pid(file: &mut File) -> Option<u32> {
     let mut contents = String::new();
     file.seek(SeekFrom::Start(0)).ok()?;

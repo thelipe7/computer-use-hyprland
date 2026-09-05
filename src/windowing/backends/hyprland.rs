@@ -1096,8 +1096,8 @@ mod tests {
 
     #[test]
     fn floating_or_unknown_windows_are_not_refused() {
-        assert!(refuse_if_tiled(0x1234abcd, &client(Some(true)), "move").is_ok());
-        assert!(refuse_if_tiled(0x1234abcd, &client(None), "resize").is_ok());
+        refuse_if_tiled(0x1234abcd, &client(Some(true)), "move").unwrap();
+        refuse_if_tiled(0x1234abcd, &client(None), "resize").unwrap();
     }
 
     #[test]

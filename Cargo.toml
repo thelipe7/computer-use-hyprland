@@ -17,6 +17,63 @@ publish = false
 name = "computer-use-hyprland"
 path = "src/main.rs"
 
+# One decision per group, made once. `priority = -1` is what lets an
+# individual lint below override the level set for the group it belongs to.
+[lints.rust]
+# Not `unsafe_code`. Talking to uinput, flock and libc is this program's job,
+# and a warning every one of those sites has to silence teaches nobody
+# anything. Edition 2024 already asks for the keyword at each call, and
+# `unsafe_op_in_unsafe_fn` is on by default in it.
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+ambiguous_negative_literals = "warn"
+redundant_imports = "warn"
+redundant_lifetimes = "warn"
+trivial_numeric_casts = "warn"
+unused_lifetimes = "warn"
+
+[lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+# Not `pedantic`, yet. Measured on clippy 0.1.98 against this tree: 230
+# warnings, and about sixty of them are numeric casts between the compositor's
+# coordinates and the image crate's, where the right answer is a decision per
+# site rather than a sweep. Turning it on is worth its own branch, with the
+# desktop available to verify the ones that change behaviour. The rest of this
+# table is what could be turned on today without one.
+#
+# Individually chosen from `restriction` and `nursery`, which are menus rather
+# than groups and must never be enabled wholesale.
+allow_attributes_without_reason = "warn"
+as_pointer_underscore = "warn"
+assertions_on_result_states = "warn"
+clone_on_ref_ptr = "warn"
+deref_by_slicing = "warn"
+empty_drop = "warn"
+empty_enum_variants_with_brackets = "warn"
+empty_structs_with_brackets = "warn"
+fn_to_numeric_cast_any = "warn"
+if_then_some_else_none = "warn"
+map_err_ignore = "warn"
+missing_assert_message = "warn"
+# One module layout, picked here so the next multi-file module cannot pick the
+# other one: `foo.rs` beside `foo/`, which names the module in the file tree as
+# well as in the source.
+mod_module_files = "warn"
+redundant_test_prefix = "warn"
+redundant_type_annotations = "warn"
+renamed_function_params = "warn"
+verbose_file_reads = "warn"
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "warn"
+invalid_html_tags = "warn"
+unescaped_backticks = "warn"
+
 [dependencies]
 mimalloc = { version = "0.1", default-features = false }
 anyhow = "1.0.104"
@@ -26,24 +83,37 @@ anyhow = "1.0.104"
 # AppArmor-confined peer (e.g. snap-packaged Slack) aborts the whole
 # AccessibilityConnection. We deliberately never use P2P routing,
 # so depend on atspi-connection directly with p2p off.
-atspi = { version = "0.30.0", default-features = false, features = ["proxies", "wrappers", "tokio"] }
-atspi-connection = { version = "0.14.0", default-features = false, features = ["wrappers"] }
+atspi = { version = "0.30.0", default-features = false, features = [
+  "proxies",
+  "wrappers",
+  "tokio",
+] }
+atspi-connection = { version = "0.14.0", default-features = false, features = [
+  "wrappers",
+] }
 base64 = "0.23.1"
 evdev = "0.13.2"
 futures-util = "0.3.34"
 getrandom = "0.4.3"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25", default-features = false, features = [
+  "jpeg",
+  "png",
+] }
 libc = "0.2"
 rmcp = { version = "3.2.0", features = ["transport-io"] }
 schemars = "1.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
-tokio = { version = "1.53.1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }
+tokio = { version = "1.53.1", features = [
+  "io-util",
+  "macros",
+  "process",
+  "rt",
+  "sync",
+  "time",
+] }
 zbus = "5.19.0"
 
-[profile.release]
-codegen-units = 1
-opt-level = 3
-lto = "fat"
-strip = "symbols"
+# Dependencies dominate a debug build's runtime here — image decoding, PNG
+# encoding, the base64 of a screenshot — and they rarely change.

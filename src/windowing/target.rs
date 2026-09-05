@@ -1,7 +1,6 @@
 use crate::windowing::registry::{self, WINDOW_PERMISSION_HINT};
 use crate::windowing::types::{WindowFocusResult, WindowInfo, WindowTarget};
 use anyhow::{Result, bail};
-use std::future::Future;
 use tokio::time::{Duration, Instant, sleep_until, timeout_at};
 
 const FOCUS_VERIFY_TIMEOUT: Duration = Duration::from_secs(1);
@@ -369,16 +368,12 @@ fn optional_title_match(actual: &Option<String>, requested: Option<&str>) -> boo
 
 pub fn window_permission_hint(error: &str) -> Option<String> {
     let lower = error.to_ascii_lowercase();
-    if lower.contains("accessdenied")
+    (lower.contains("accessdenied")
         || lower.contains("access denied")
         || lower.contains("not allowed")
         || lower.contains("operation not permitted")
-        || lower.contains("failed to connect to session bus")
-    {
-        Some(WINDOW_PERMISSION_HINT.to_string())
-    } else {
-        None
-    }
+        || lower.contains("failed to connect to session bus"))
+    .then(|| WINDOW_PERMISSION_HINT.to_string())
 }
 
 fn normalized_target(value: Option<&str>) -> Option<String> {

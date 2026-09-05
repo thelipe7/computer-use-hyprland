@@ -14,7 +14,7 @@ use atspi_connection::AccessibilityConnection;
 use futures_util::{StreamExt, stream};
 use schemars::JsonSchema;
 use serde::Serialize;
-use std::{collections::VecDeque, future::Future, time::Duration};
+use std::{collections::VecDeque, time::Duration};
 use tokio::time::timeout;
 use zbus::{
     fdo::DBusProxy,
@@ -1136,9 +1136,9 @@ mod tests {
         let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut remaining_attempts = 3;
         let batch = fetch_indexed_up_to(100, 10, &mut remaining_attempts, {
-            let calls = calls.clone();
+            let calls = std::sync::Arc::clone(&calls);
             move |index| {
-                let calls = calls.clone();
+                let calls = std::sync::Arc::clone(&calls);
                 async move {
                     calls.lock().unwrap().push(index);
                     if index == 1 { Err(()) } else { Ok(index) }

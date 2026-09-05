@@ -1,3 +1,6 @@
+//! Print the real error chain behind a failed AT-SPI connection, which is
+//! the one diagnostic `doctor` reduces to a yes or a no.
+
 // Scratch probe: surface the real AT-SPI connection error chain.
 use atspi_connection::AccessibilityConnection;
 
