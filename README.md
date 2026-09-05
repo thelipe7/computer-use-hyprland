@@ -33,6 +33,22 @@ refuses.
 | Literal text | `wtype`, the Wayland virtual-keyboard protocol |
 | Keys and chords | `ydotool` through a connectable `ydotoold` socket |
 
+### What has to be there
+
+`doctor` reports each of these, and says which one is missing when input or
+capture fails.
+
+- **`/dev/uinput`, readable and writable by your user.** Both the pointer this
+  server creates and `ydotoold` open it. On most distributions that is a
+  `uaccess` rule or membership of the `input` group.
+- **`ydotoold` running in the user session**, with a socket this process can
+  connect to. It sends the keys and chords.
+- **`wtype` on `PATH`**, for literal text. Without it, text falls back to
+  ydotool's scancodes, which are re-interpreted by the keyboard layout and
+  mangle anything that is not plain ASCII.
+- **`grim` on the *portal's* `PATH`**, which is not necessarily your shell's.
+  Without it the portal answers a screenshot with response 2.
+
 ## Install
 
 From the registry:

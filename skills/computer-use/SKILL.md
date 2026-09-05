@@ -27,7 +27,9 @@ client; this says how they fit together and where the surprises are.
    focus cannot be verified, so this step is not optional.
 3. **Read before acting.** `get_app_state` returns the accessibility tree with
    an `element_index` on each node. That index is how everything else names an
-   element.
+   element. Pass `pid` or `window_id`: an untargeted tree is anchored to a
+   window only when exactly one matches, and element coordinates are offsets
+   from that window's origin.
 4. **Act**: `click`, `type_text`, `press_key`, `drag`, `scroll`,
    `perform_action`, `set_value`.
 5. **Verify.** `wait_for` blocks until a predicate holds, up to `timeout_ms`.
@@ -149,8 +151,20 @@ coordinate problem from an input-backend one.
 
 One trap when reaching for `hyprctl` directly: on a Hyprland configured in
 Lua, `hyprctl dispatch movewindowpixel …` is rejected, because the Lua config
-wraps every dispatch argument and only the `hl.dsp.*` table forms parse. The
-server tries both and needs no help; a hand-run does.
+wraps every dispatch argument as `hl.dispatch(...)` and only the `hl.dsp.*`
+table forms parse. The server tries both and needs no help; a hand-run does.
+The working forms are:
+
+```
+hl.dsp.focus({ window = "address:0x…" })
+hl.dsp.window.move({ window = "address:0x…", exact = true, x = …, y = … })
+hl.dsp.window.resize({ window = "address:0x…", exact = true, x = …, y = … })
+hl.dsp.window.float({ window = "address:0x…", action = "set" })
+```
+
+`float` with no argument toggles the *focused* window, which is rarely the one
+meant. And `hyprctl eval` prints only "ok", so a name is listed by making it
+an error: `error(table.concat(keys, ","))`.
 
 ## Applications that expose no tree
 
