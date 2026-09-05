@@ -28,7 +28,7 @@ pub(crate) mod atspi_tree {
 
 pub(crate) mod diagnostics {
     pub(crate) use crate::diagnostics_impl::{
-        doctor_report, hydrate_session_bus_env, setup_accessibility_report,
+        doctor_report, hydrate_session_bus_env, setup_accessibility_report, user_id,
         wtype_compatible_wayland_desktop, DoctorReport, ReadinessReport, SetupReport,
     };
 }

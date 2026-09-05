@@ -741,7 +741,7 @@ fn ydotool_socket_check() -> Check {
     ))
 }
 
-fn user_id() -> Option<String> {
+pub(crate) fn user_id() -> Option<String> {
     let output = Command::new("id").arg("-u").output().ok()?;
     output
         .status

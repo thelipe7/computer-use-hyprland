@@ -4,7 +4,9 @@ use crate::atspi_tree::{
     snapshot_limits, snapshot_tree, AccessibilityAction, AccessibilityNode, AccessibleAppSummary,
     Bounds, FocusedElementSummary, ValueSetInvocation,
 };
-use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
+use crate::diagnostics::{
+    doctor_report, setup_accessibility_report, user_id, DoctorReport, SetupReport,
+};
 use crate::screenshot::{
     capture_screenshot_raw, prepare_screenshot_payload, RawScreenshotCapture, ScreenshotCapture,
     ScreenshotOutputFormat, ScreenshotPayloadOptions,
@@ -848,39 +850,25 @@ impl ComputerUseLinux {
             .input_gate("click", params.window_target().as_ref())
             .await
         {
-            return Json(ActionOutput {
-                ok: false,
-                implemented: true,
-                action: "click".to_string(),
-                message,
-                received,
-            });
+            return Json(action_failure("click", message, received));
         }
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         // Raise the target window first (if specified) so the click lands on the
         // intended app rather than whatever is stacked on top at that pixel.
         let window_target = params.window_target();
         if params.relative == Some(true) && window_target.is_none() {
-            return Json(ActionOutput {
-                ok: false,
-                implemented: true,
-                action: "click".to_string(),
-                message: "Relative coordinate clicks require a window target.".to_string(),
+            return Json(action_failure(
+                "click",
+                "Relative coordinate clicks require a window target.".to_string(),
                 received,
-            });
+            ));
         }
         let mut focus = None;
         if let Some(target) = window_target {
             focus = match self.focus_target_for_input(&target).await {
                 Ok(focus) => focus,
                 Err(message) => {
-                    return Json(ActionOutput {
-                        ok: false,
-                        implemented: true,
-                        action: "click".to_string(),
-                        message,
-                        received,
-                    });
+                    return Json(action_failure("click", message, received));
                 }
             };
             tokio::time::sleep(Duration::from_millis(120)).await;
@@ -888,38 +876,24 @@ impl ComputerUseLinux {
             // the agent can click the pixel it saw in a window-cropped screenshot.
             if params.relative == Some(true) {
                 let Some(focus) = focus.as_ref() else {
-                    return Json(ActionOutput {
-                        ok: false,
-                        implemented: true,
-                        action: "click".to_string(),
-                        message: "Relative coordinate clicks require verified target-window focus."
+                    return Json(action_failure(
+                        "click",
+                        "Relative coordinate clicks require verified target-window focus."
                             .to_string(),
                         received,
-                    });
+                    ));
                 };
                 let coordinate_map = match self.focused_window_coordinate_map(focus).await {
                     Ok(mapping) => mapping,
                     Err(message) => {
-                        return Json(ActionOutput {
-                            ok: false,
-                            implemented: true,
-                            action: "click".to_string(),
-                            message,
-                            received,
-                        });
+                        return Json(action_failure("click", message, received));
                     }
                 };
                 if let Err(message) = apply_window_relative_click_coordinates(
                     &mut params,
                     coordinate_map.capture_rect,
                 ) {
-                    return Json(ActionOutput {
-                        ok: false,
-                        implemented: true,
-                        action: "click".to_string(),
-                        message,
-                        received,
-                    });
+                    return Json(action_failure("click", message, received));
                 }
             }
         }
@@ -927,25 +901,13 @@ impl ComputerUseLinux {
         let target = match self.resolve_click_target(&params, bounds.offset()) {
             Ok(target) => target,
             Err(message) => {
-                return Json(ActionOutput {
-                    ok: false,
-                    implemented: true,
-                    action: "click".to_string(),
-                    message,
-                    received,
-                });
+                return Json(action_failure("click", message, received));
             }
         };
         let held_modifiers = match modifier_keycodes(&params.modifiers) {
             Ok(codes) => codes,
             Err(message) => {
-                return Json(ActionOutput {
-                    ok: false,
-                    implemented: true,
-                    action: "click".to_string(),
-                    message,
-                    received,
-                });
+                return Json(action_failure("click", message, received));
             }
         };
         let (element_index, object_ref, action, point, bounds_offset, states) = match target {
@@ -1026,13 +988,11 @@ impl ComputerUseLinux {
                 }
                 Ok(_) => format!("{action_label} on element_index {element_index} returned false"),
                 Err(error) if is_stale_object_error(&error) => {
-                    return Json(ActionOutput {
-                        ok: false,
-                        implemented: true,
-                        action: "click".to_string(),
-                        message: STALE_TREE_MESSAGE.to_string(),
+                    return Json(action_failure(
+                        "click",
+                        STALE_TREE_MESSAGE.to_string(),
                         received,
-                    });
+                    ));
                 }
                 Err(error) => format!(
                     "{action_label} on element_index {element_index} failed: {}",
@@ -1040,13 +1000,11 @@ impl ComputerUseLinux {
                 ),
             };
             if point.is_none() {
-                return Json(ActionOutput {
-                    ok: false,
-                    implemented: true,
-                    action: "click".to_string(),
-                    message: format!("{failure}, and no clickable bounds were cached."),
+                return Json(action_failure(
+                    "click",
+                    format!("{failure}, and no clickable bounds were cached."),
                     received,
-                });
+                ));
             }
             notes.push(format!("{failure}; fell back to the pointer."));
         }
@@ -1092,13 +1050,11 @@ impl ComputerUseLinux {
                 .await;
         }
         if let Err(message) = run_ydotool(&modifier_hold_args(held_modifiers, true)).await {
-            return Json(ActionOutput {
-                ok: false,
-                implemented: true,
-                action: "click".to_string(),
-                message: format!("Could not hold the modifiers through ydotool: {message}"),
+            return Json(action_failure(
+                "click",
+                format!("Could not hold the modifiers through ydotool: {message}"),
                 received,
-            });
+            ));
         }
         let output = self
             .click_at_point(x, y, params, received, input_guard)
@@ -1189,13 +1145,11 @@ impl ComputerUseLinux {
         Parameters(params): Parameters<ActionParams>,
     ) -> Json<ActionOutput> {
         if let Err(message) = self.input_gate("perform_action", None).await {
-            return Json(ActionOutput {
-                ok: false,
-                implemented: true,
-                action: "perform_action".to_string(),
+            return Json(action_failure(
+                "perform_action",
                 message,
-                received: Some(serde_json::json!(params.clone())),
-            });
+                Some(serde_json::json!(params.clone())),
+            ));
         }
         let requested_action = requested_or_primary_action(params.action.as_deref());
         self.perform_element_action(&params, Some(requested_action))
@@ -1218,13 +1172,7 @@ impl ComputerUseLinux {
     ) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params.clone()));
         if let Err(message) = self.input_gate("set_value", None).await {
-            return Json(ActionOutput {
-                ok: false,
-                implemented: true,
-                action: "set_value".to_string(),
-                message,
-                received,
-            });
+            return Json(action_failure("set_value", message, received));
         }
         let object_ref = match self.resolve_object_ref(
             params.element_index,
@@ -1237,13 +1185,7 @@ impl ComputerUseLinux {
         ) {
             Ok(object_ref) => object_ref,
             Err(message) => {
-                return Json(ActionOutput {
-                    ok: false,
-                    implemented: true,
-                    action: "set_value".to_string(),
-                    message,
-                    received,
-                });
+                return Json(action_failure("set_value", message, received));
             }
         };
 
@@ -1270,13 +1212,11 @@ impl ComputerUseLinux {
                 self.keyboard_set_value(&object_ref, &params.value, received)
                     .await
             }
-            Err(error) => Json(ActionOutput {
-                ok: false,
-                implemented: true,
-                action: "set_value".to_string(),
-                message: element_error_message(&error),
+            Err(error) => Json(action_failure(
+                "set_value",
+                element_error_message(&error),
                 received,
-            }),
+            )),
         }
     }
 
@@ -1296,13 +1236,7 @@ impl ComputerUseLinux {
             .input_gate("scroll", params.window_target().as_ref())
             .await
         {
-            return Json(ActionOutput {
-                ok: false,
-                implemented: true,
-                action: "scroll".to_string(),
-                message,
-                received,
-            });
+            return Json(action_failure("scroll", message, received));
         }
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let units = ((params.pages.unwrap_or(1.0).abs().max(0.1) * 5.0).round() as i32).max(1);
@@ -1310,63 +1244,40 @@ impl ComputerUseLinux {
         // events land on the intended app.
         let window_target = params.window_target();
         if params.relative == Some(true) && window_target.is_none() {
-            return Json(ActionOutput {
-                ok: false,
-                implemented: true,
-                action: "scroll".to_string(),
-                message: "Relative scroll coordinates require a window target.".to_string(),
+            return Json(action_failure(
+                "scroll",
+                "Relative scroll coordinates require a window target.".to_string(),
                 received,
-            });
+            ));
         }
         if let Some(target) = window_target {
             let focus = match self.focus_target_for_input(&target).await {
                 Ok(focus) => focus,
                 Err(message) => {
-                    return Json(ActionOutput {
-                        ok: false,
-                        implemented: true,
-                        action: "scroll".to_string(),
-                        message,
-                        received,
-                    });
+                    return Json(action_failure("scroll", message, received));
                 }
             };
             tokio::time::sleep(Duration::from_millis(120)).await;
             if params.relative == Some(true) {
                 let Some(focus) = focus.as_ref() else {
-                    return Json(ActionOutput {
-                        ok: false,
-                        implemented: true,
-                        action: "scroll".to_string(),
-                        message:
-                            "Relative scroll coordinates require verified target-window focus."
-                                .to_string(),
+                    return Json(action_failure(
+                        "scroll",
+                        "Relative scroll coordinates require verified target-window focus."
+                            .to_string(),
                         received,
-                    });
+                    ));
                 };
                 let coordinate_map = match self.focused_window_coordinate_map(focus).await {
                     Ok(mapping) => mapping,
                     Err(message) => {
-                        return Json(ActionOutput {
-                            ok: false,
-                            implemented: true,
-                            action: "scroll".to_string(),
-                            message,
-                            received,
-                        });
+                        return Json(action_failure("scroll", message, received));
                     }
                 };
                 if let Err(message) = apply_window_relative_scroll_coordinates(
                     &mut params,
                     coordinate_map.capture_rect,
                 ) {
-                    return Json(ActionOutput {
-                        ok: false,
-                        implemented: true,
-                        action: "scroll".to_string(),
-                        message,
-                        received,
-                    });
+                    return Json(action_failure("scroll", message, received));
                 }
             } else if params.x.is_none() && params.y.is_none() && params.element_index.is_none() {
                 // A window target without a point would otherwise scroll
@@ -1374,37 +1285,22 @@ impl ComputerUseLinux {
                 // move the cursor, and the wheel path never repositions it.
                 // Default to the centre of the resolved target window.
                 let Some(focus) = focus.as_ref() else {
-                    return Json(ActionOutput {
-                        ok: false,
-                        implemented: true,
-                        action: "scroll".to_string(),
-                        message: "Window-targeted scroll requires verified target-window focus."
-                            .to_string(),
+                    return Json(action_failure(
+                        "scroll",
+                        "Window-targeted scroll requires verified target-window focus.".to_string(),
                         received,
-                    });
+                    ));
                 };
                 let coordinate_map = match self.focused_window_coordinate_map(focus).await {
                     Ok(mapping) => mapping,
                     Err(message) => {
-                        return Json(ActionOutput {
-                            ok: false,
-                            implemented: true,
-                            action: "scroll".to_string(),
-                            message,
-                            received,
-                        });
+                        return Json(action_failure("scroll", message, received));
                     }
                 };
                 if let Err(message) =
                     apply_window_center_scroll_point(&mut params, coordinate_map.capture_rect)
                 {
-                    return Json(ActionOutput {
-                        ok: false,
-                        implemented: true,
-                        action: "scroll".to_string(),
-                        message,
-                        received,
-                    });
+                    return Json(action_failure("scroll", message, received));
                 }
             }
         }
@@ -1434,13 +1330,11 @@ impl ComputerUseLinux {
                     "{action_label} returned false; fell back to the wheel."
                 )),
                 Err(error) if is_stale_object_error(&error) => {
-                    return Json(ActionOutput {
-                        ok: false,
-                        implemented: true,
-                        action: "scroll".to_string(),
-                        message: STALE_TREE_MESSAGE.to_string(),
+                    return Json(action_failure(
+                        "scroll",
+                        STALE_TREE_MESSAGE.to_string(),
                         received,
-                    });
+                    ));
                 }
                 Err(error) => notes.push(format!(
                     "{action_label} failed ({}); fell back to the wheel.",
@@ -1457,13 +1351,7 @@ impl ComputerUseLinux {
         ) {
             Ok(point) => point,
             Err(message) => {
-                return Json(ActionOutput {
-                    ok: false,
-                    implemented: true,
-                    action: "scroll".to_string(),
-                    message,
-                    received,
-                });
+                return Json(action_failure("scroll", message, received));
             }
         };
         let direction = match params.direction.to_ascii_lowercase().as_str() {
@@ -1472,14 +1360,11 @@ impl ComputerUseLinux {
             "left" => ScrollDirection::Left,
             "right" => ScrollDirection::Right,
             _ => {
-                return Json(ActionOutput {
-                    ok: false,
-                    implemented: true,
-                    action: "scroll".to_string(),
-                    message: "Unsupported scroll direction; expected up, down, left, or right."
-                        .to_string(),
+                return Json(action_failure(
+                    "scroll",
+                    "Unsupported scroll direction; expected up, down, left, or right.".to_string(),
                     received,
-                });
+                ));
             }
         };
         let mut point_notes = Vec::new();
@@ -1523,47 +1408,39 @@ impl ComputerUseLinux {
     )]
     async fn drag(&self, Parameters(params): Parameters<DragParams>) -> Json<ActionOutput> {
         if let Err(message) = self.input_gate("drag", None).await {
-            return Json(ActionOutput {
-                ok: false,
-                implemented: true,
-                action: "drag".to_string(),
+            return Json(action_failure(
+                "drag",
                 message,
-                received: Some(serde_json::json!(params)),
-            });
+                Some(serde_json::json!(params)),
+            ));
         }
         let held_modifiers = match modifier_keycodes(&params.modifiers) {
             Ok(codes) => codes,
             Err(message) => {
-                return Json(ActionOutput {
-                    ok: false,
-                    implemented: true,
-                    action: "drag".to_string(),
+                return Json(action_failure(
+                    "drag",
                     message,
-                    received: Some(serde_json::json!(params)),
-                });
+                    Some(serde_json::json!(params)),
+                ));
             }
         };
         let (start, end, mut notes) = match self.resolve_drag_endpoints(&params).await {
             Ok(resolved) => resolved,
             Err(message) => {
-                return Json(ActionOutput {
-                    ok: false,
-                    implemented: true,
-                    action: "drag".to_string(),
+                return Json(action_failure(
+                    "drag",
                     message,
-                    received: Some(serde_json::json!(params)),
-                });
+                    Some(serde_json::json!(params)),
+                ));
             }
         };
         if !held_modifiers.is_empty() {
             if let Err(message) = run_ydotool(&modifier_hold_args(&held_modifiers, true)).await {
-                return Json(ActionOutput {
-                    ok: false,
-                    implemented: true,
-                    action: "drag".to_string(),
-                    message: format!("Could not hold the modifiers through ydotool: {message}"),
-                    received: Some(serde_json::json!(params)),
-                });
+                return Json(action_failure(
+                    "drag",
+                    format!("Could not hold the modifiers through ydotool: {message}"),
+                    Some(serde_json::json!(params)),
+                ));
             }
         }
         let modifiers = params.modifiers.join("+");
@@ -1743,37 +1620,19 @@ impl ComputerUseLinux {
             .input_gate("press_key", Some(&params.window_target()))
             .await
         {
-            return Json(ActionOutput {
-                ok: false,
-                implemented: true,
-                action: "press_key".to_string(),
-                message,
-                received,
-            });
+            return Json(action_failure("press_key", message, received));
         }
         let keys = match press_key_sequence(params.key.as_deref(), &params.keys) {
             Ok(keys) => keys,
             Err(message) => {
-                return Json(ActionOutput {
-                    ok: false,
-                    implemented: true,
-                    action: "press_key".to_string(),
-                    message,
-                    received,
-                });
+                return Json(action_failure("press_key", message, received));
             }
         };
         let mut input_guard = Some(Arc::clone(&self.input_operation_lock).lock_owned().await);
         let focus = match self.focus_target_for_input(&params.window_target()).await {
             Ok(focus) => focus,
             Err(message) => {
-                return Json(ActionOutput {
-                    ok: false,
-                    implemented: true,
-                    action: "press_key".to_string(),
-                    message,
-                    received,
-                });
+                return Json(action_failure("press_key", message, received));
             }
         };
         let mut last_output = None;
@@ -1827,15 +1686,9 @@ impl ComputerUseLinux {
         let Some(key_events) = key_sequence(key) else {
             return (
                 Some(input_guard),
-                ActionOutput {
-                    ok: false,
-                    implemented: true,
-                    action: "press_key".to_string(),
-                    message: format!(
+                action_failure("press_key", format!(
                         "Unsupported key {key:?}. Use names like Enter, Escape, Tab, ArrowLeft, Super, Ctrl+L, or a single US keyboard letter/digit."
-                    ),
-                    received,
-                },
+                    ), received),
             );
         };
         // A chord holds its modifiers down across the key press; a bare key
@@ -1888,25 +1741,13 @@ impl ComputerUseLinux {
             .input_gate("type_text", Some(&params.window_target()))
             .await
         {
-            return Json(ActionOutput {
-                ok: false,
-                implemented: true,
-                action: "type_text".to_string(),
-                message,
-                received,
-            });
+            return Json(action_failure("type_text", message, received));
         }
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let focus = match self.focus_target_for_input(&params.window_target()).await {
             Ok(focus) => focus,
             Err(message) => {
-                return Json(ActionOutput {
-                    ok: false,
-                    implemented: true,
-                    action: "type_text".to_string(),
-                    message,
-                    received,
-                });
+                return Json(action_failure("type_text", message, received));
             }
         };
         // X11: xdotool type resolves keysyms against the live XKB layout.
@@ -3892,15 +3733,7 @@ impl ComputerUseLinux {
         value: &str,
         received: Option<serde_json::Value>,
     ) -> Json<ActionOutput> {
-        let fail = |message: String| {
-            Json(ActionOutput {
-                ok: false,
-                implemented: true,
-                action: "set_value".to_string(),
-                message,
-                received: received.clone(),
-            })
-        };
+        let fail = |message: String| Json(action_failure("set_value", message, received.clone()));
         match grab_focus(object_ref).await {
             Ok(true) => {}
             Ok(false) => {
@@ -4227,13 +4060,7 @@ impl ComputerUseLinux {
         ) {
             Ok(object_ref) => object_ref,
             Err(message) => {
-                return Json(ActionOutput {
-                    ok: false,
-                    implemented: true,
-                    action: "perform_action".to_string(),
-                    message,
-                    received,
-                });
+                return Json(action_failure("perform_action", message, received));
             }
         };
 
@@ -4289,13 +4116,11 @@ impl ComputerUseLinux {
                 },
                 received,
             }),
-            Err(error) => Json(ActionOutput {
-                ok: false,
-                implemented: true,
-                action: "perform_action".to_string(),
-                message: element_error_message(&error),
+            Err(error) => Json(action_failure(
+                "perform_action",
+                element_error_message(&error),
                 received,
-            }),
+            )),
         }
     }
 }
@@ -5116,6 +4941,22 @@ fn crop_png(
     Ok((out, w, h))
 }
 
+/// A failed tool result. Every input tool builds the same five fields on every
+/// early return, so they are built here instead of at each of them.
+fn action_failure(
+    action: &str,
+    message: String,
+    received: Option<serde_json::Value>,
+) -> ActionOutput {
+    ActionOutput {
+        ok: false,
+        implemented: true,
+        action: action.to_string(),
+        message,
+        received,
+    }
+}
+
 fn action_result(
     action: &str,
     result: std::result::Result<Vec<Output>, String>,
@@ -5788,15 +5629,6 @@ fn keycode_for_ascii(value: char) -> Option<u16> {
         '0' => Some(11),
         _ => None,
     }
-}
-
-fn user_id() -> Option<String> {
-    let output = Command::new("id").arg("-u").output().ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 fn list_process_apps() -> Vec<AppCandidate> {
