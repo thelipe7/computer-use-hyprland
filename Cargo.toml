@@ -6,7 +6,6 @@ edition = "2024"
 # only compiler anything here is built or tested with. A lower number would
 # be a claim nothing checks.
 rust-version = "1.98.1"
-authors = ["Felipe Machado <felipemmachado266@gmail.com>"]
 license = "MIT"
 description = "Hyprland desktop control over MCP: AT-SPI accessibility tree, hyprctl window targeting, portal screenshots, and uinput input synthesis."
 repository = "https://github.com/thelipe7/computer-use-hyprland"
