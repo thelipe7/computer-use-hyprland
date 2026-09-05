@@ -456,12 +456,12 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "pointer_position",
-        description = "Report the current pointer position in desktop coordinates (the click/scroll/drag coordinate space). Supported on Hyprland (hyprctl cursorpos) and X11 (xdotool getmouselocation); other sessions answer ok=false.",
+        description = "Report the current pointer position in desktop coordinates, the space click, scroll and drag take. Read from hyprctl cursorpos; a session that is not Hyprland answers ok=false.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
             idempotent_hint = true,
-            open_world_hint = false
+            open_world_hint = true
         )
     )]
     async fn pointer_position(&self) -> Json<PointerPositionOutput> {
@@ -6207,6 +6207,82 @@ mod tests {
         assert_eq!(compacted.len(), 3);
         assert_eq!(compacted[2].role, "page tab");
         assert_eq!(compacted[2].name.as_deref(), Some("Hidden"));
+    }
+
+    #[test]
+    fn drag_endpoint_resolves_an_element_index_to_its_centre() {
+        let backend = ComputerUseLinux::default();
+        backend.cache_nodes(&[node(
+            7,
+            Some(Bounds {
+                x: 10,
+                y: 20,
+                width: 100,
+                height: 40,
+            }),
+        )]);
+
+        let (point, note) = backend
+            .drag_endpoint("start", Some(7), None, None, (0, 0), None)
+            .expect("a cached node with positive bounds resolves");
+
+        assert_eq!(point, (60, 40));
+        assert!(note.contains("start_element_index 7"), "{note}");
+        assert!(note.contains("desktop point (60, 40)"), "{note}");
+    }
+
+    #[test]
+    fn drag_endpoint_offsets_an_element_by_the_window_origin() {
+        let backend = ComputerUseLinux::default();
+        backend.cache_nodes(&[node(
+            3,
+            Some(Bounds {
+                x: 232,
+                y: 347,
+                width: 220,
+                height: 28,
+            }),
+        )]);
+
+        let (point, note) = backend
+            .drag_endpoint("end", Some(3), None, None, (0, 0), Some((965, 48)))
+            .expect("a cached node with positive bounds resolves");
+
+        assert_eq!(point, (1307, 409));
+        assert!(
+            note.contains("offset by the window origin (965, 48)"),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn drag_endpoint_offsets_relative_coordinates_by_the_window_origin() {
+        let backend = ComputerUseLinux::default();
+
+        let (point, note) = backend
+            .drag_endpoint("start", None, Some(352), Some(971), (965, 48), None)
+            .expect("a coordinate pair resolves");
+
+        assert_eq!(point, (1317, 1019));
+        assert!(note.contains("window-relative (352, 971)"), "{note}");
+    }
+
+    #[test]
+    fn drag_endpoint_refuses_a_half_given_or_doubly_given_end() {
+        let backend = ComputerUseLinux::default();
+
+        let missing = backend
+            .drag_endpoint("end", None, Some(10), None, (0, 0), None)
+            .unwrap_err();
+        assert!(
+            missing.contains("end_x and end_y, or end_element_index"),
+            "{missing}"
+        );
+
+        let both = backend
+            .drag_endpoint("start", Some(1), Some(10), Some(20), (0, 0), None)
+            .unwrap_err();
+        assert!(both.contains("not both"), "{both}");
     }
 
     #[test]

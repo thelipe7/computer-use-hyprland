@@ -94,6 +94,8 @@ READ_ONLY_TOOLS = {
     "get_app_state",
     "list_windows",
     "focused_window",
+    "wait_for",
+    "pointer_position",
 }
 
 DESTRUCTIVE_MUTATING_TOOLS = {
@@ -110,16 +112,15 @@ NON_DESTRUCTIVE_MUTATING_TOOLS = EXPECTED_TOOLS - READ_ONLY_TOOLS - DESTRUCTIVE_
 
 IDEMPOTENT_TOOLS = READ_ONLY_TOOLS | {
     "setup_accessibility",
-    "setup_window_targeting",
     "activate_window",
     "move_window",
     "resize_window",
+    "set_window_floating",
 }
 
 OPEN_WORLD_TOOLS = (EXPECTED_TOOLS | {SHELL_TOOL}) - {
     "doctor",
     "setup_accessibility",
-    "setup_window_targeting",
 }
 
 
