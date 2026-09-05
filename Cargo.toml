@@ -2,6 +2,10 @@
 name = "computer-use-hyprland"
 version = "0.6.0"
 edition = "2021"
+# The floor is the toolchain `rust-toolchain.toml` pins, because that is the
+# only compiler anything here is built or tested with. A lower number would
+# be a claim nothing checks.
+rust-version = "1.98.1"
 authors = ["Felipe Machado <felipemmachado266@gmail.com>"]
 license = "MIT"
 description = "Hyprland desktop control over MCP: AT-SPI accessibility tree, hyprctl window targeting, portal screenshots, and uinput input synthesis."
