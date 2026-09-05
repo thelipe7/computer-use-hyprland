@@ -1800,7 +1800,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "move_window",
-        description = "Move a window to a new desktop position (frame top-left in desktop coordinates). Useful to recover windows that are partially off-screen. Works through the computer-use-hyprland GNOME Shell extension or a generic X11/EWMH window manager (wmctrl).",
+        description = "Move a window to a new desktop position (frame top-left in desktop coordinates). Useful to recover a window that is partially off-screen. Dispatched through hyprctl, so it needs a floating window: Hyprland ignores a pixel move on a tiled one, and the call is refused before anything is dispatched. Call set_window_floating with floating=true first, then put the layout back with floating=false.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1822,7 +1822,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "resize_window",
-        description = "Resize a window to a new frame width/height in desktop pixels, unmaximizing it first if needed. Useful to fit a window fully on-screen. Works through the computer-use-hyprland GNOME Shell extension or a generic X11/EWMH window manager (wmctrl).",
+        description = "Resize a window to a new frame width/height in desktop pixels. Useful to fit a window fully on-screen. Dispatched through hyprctl, so it needs a floating window: on a tiled one a pixel resize moves the layout split and resizes the neighbours instead, so the call is refused before anything is dispatched. Call set_window_floating with floating=true first, then put the layout back with floating=false.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
