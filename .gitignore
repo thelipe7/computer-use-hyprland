@@ -1,43 +1,28 @@
-# Rust build artifacts
+# Everything Cargo builds. Reproducible from the sources and the lockfile, so
+# none of it belongs in history.
 /target/
-**/*.rs.bk
-Cargo.lock.bak
 
-# Editor / OS
-.DS_Store
-*.swp
-*.swo
-*~
+# rustfmt leaves these behind.
+**/*.rs.bk
+
+# Editors and IDEs. These belong in a global gitignore, but a contributor
+# without one should not have to learn that in a pull request review.
 .idea/
 .vscode/
 *.iml
+*.swp
+*.swo
+*~
 
-# Local environment overrides
-.env
-.env.local
-.env.publish
-.npmrc
-.secrets/
+# What the operating system's file browser leaves behind.
+.DS_Store
+Thumbs.db
 
-# Screenshot scratch
-/tmp-screenshots/
-dist/
-
-# node deps (zod schema check is CI-only, deps installed on demand)
-node_modules/
-/pi/node_modules/
-
-# Python bytecode cache
+# Python's bytecode cache, from running scripts/mcp_safety_check.py.
 __pycache__/
 *.py[cod]
 
-# npm wrapper postinstall artifacts from local smoke tests
-/npm/bin/computer-use-hyprland-linux-*
-/npm/bin/computer-use-hyprland-darwin-*
-/npm/bin/computer-use-hyprland-win32-*
-/npm/bin/computer-use-hyprland-cosmic
-/.agent-shell/
-
-
-# Agent docs
-.agent-docs
+# Local environment overrides, which is where a token or a socket path ends
+# up if anybody writes one down.
+.env
+.env.local
