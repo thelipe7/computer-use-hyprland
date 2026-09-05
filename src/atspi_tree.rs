@@ -896,19 +896,16 @@ async fn text_from_proxies(
     })
 }
 
-/// `org.a11y.atspi.Text.GetNSelections`, called by its real name.
+/// `org.a11y.atspi.Text.GetNSelections`.
 ///
-/// `TextProxy::get_nselections` cannot be used. zbus derives the D-Bus method
-/// name from the Rust one by pascal-casing it, so `get_nselections` is sent as
-/// `GetNselections` while the interface — and every server implementing it,
-/// including accesskit's, which names its method `get_n_selections` — spells
-/// it `GetNSelections`. The call therefore fails with
-/// `org.freedesktop.DBus.Error.UnknownMethod` on every app, which is why the
-/// count used to read as zero. Measured against atspi-proxies 0.13.0 and zbus
-/// 5.15.0 on 2026-09-05; drop this helper if atspi renames the method.
-/// `get_selection` needs no such treatment: it pascal-cases correctly.
+/// Until atspi-proxies 0.14.0 this needed a hand-rolled call: the proxy method
+/// was named `get_nselections`, and zbus derives the wire name by pascal-casing
+/// the Rust one, so it was sent as `GetNselections` while the interface spells
+/// it `GetNSelections`. Every call failed with `UnknownMethod` and the count
+/// read as zero. Upstream renamed the method and pinned the name with
+/// `#[zbus(name)]` in 0.14.0, so the generated call is correct now.
 async fn text_selection_count(text: &TextProxy<'_>) -> zbus::Result<i32> {
-    text.inner().call("GetNSelections", &()).await
+    text.get_n_selections().await
 }
 
 /// How many selections to read back, and the error to report when the count

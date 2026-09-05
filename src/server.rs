@@ -26,7 +26,7 @@ use crate::ydotool;
 use anyhow::Result;
 use rmcp::{
     handler::server::wrapper::{Json, Parameters},
-    model::{CallToolResult, Content},
+    model::{CallToolResult, ContentBlock},
     schemars::JsonSchema,
     tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt,
 };
@@ -778,8 +778,8 @@ impl ComputerUseLinux {
             }
         }
         Ok(CallToolResult::success(vec![
-            Content::image(data_url_payload(&capture.data_url), capture.mime_type),
-            Content::text(caption.to_string()),
+            ContentBlock::image(data_url_payload(&capture.data_url), capture.mime_type),
+            ContentBlock::text(caption.to_string()),
         ]))
     }
 
