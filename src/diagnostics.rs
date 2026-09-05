@@ -9,6 +9,7 @@ use std::{
     os::unix::{fs::MetadataExt, net::UnixDatagram},
     path::{Path, PathBuf},
     process::Command,
+    sync::Once,
 };
 
 const DESKTOP_ENV_KEYS: &[&str] = &[
@@ -245,12 +246,21 @@ fn capability_map(
 /// inherited nothing, or from an MCP client that spawns with a bare
 /// environment.
 ///
-/// Every write below is `unsafe` in edition 2024, because setting a variable
-/// while another thread reads one is undefined behavior. `run_cli_from_env`
-/// calls this first, before the runtime exists and before anything is
-/// spawned, and that is the call that does the work: the tool paths that call
-/// it again find each variable already set and write nothing.
+/// **Runs at most once per process.** Every write it makes is `unsafe` in
+/// edition 2024, because setting a variable while another thread reads one is
+/// undefined behavior, and this process spawns blocking threads as soon as it
+/// starts serving. `run_cli_from_env` calls this as its first statement, when
+/// the runtime has not scheduled anything and no other thread exists; the
+/// `Once` is what makes that the only call that ever writes, rather than the
+/// first of five that happen to find nothing left to do.
+///
+/// Every `SAFETY` comment below rests on this, and on nothing else.
 pub fn hydrate_session_bus_env() {
+    static HYDRATED: Once = Once::new();
+    HYDRATED.call_once(hydrate_session_bus_env_once);
+}
+
+fn hydrate_session_bus_env_once() {
     hydrate_common_command_path();
     hydrate_desktop_env_from_process_tree();
     hydrate_desktop_env_from_systemd_user();
@@ -259,8 +269,8 @@ pub fn hydrate_session_bus_env() {
         && let Some(runtime) = xdg_runtime_dir()
         && runtime.exists()
     {
-        // SAFETY: see `hydrate_session_bus_env`, which every one of these runs
-        // under: the write that matters happens before anything is spawned.
+        // SAFETY: see `hydrate_session_bus_env`. This runs once, from the
+        // startup call, before any other thread exists.
         unsafe { env::set_var("XDG_RUNTIME_DIR", runtime) };
     }
 
@@ -269,8 +279,8 @@ pub fn hydrate_session_bus_env() {
     {
         let bus = runtime.join("bus");
         if bus.exists() {
-            // SAFETY: see `hydrate_session_bus_env`, which every one of these runs
-            // under: the write that matters happens before anything is spawned.
+            // SAFETY: see `hydrate_session_bus_env`. This runs once, from the
+            // startup call, before any other thread exists.
             unsafe {
                 env::set_var(
                     "DBUS_SESSION_BUS_ADDRESS",
@@ -281,27 +291,50 @@ pub fn hydrate_session_bus_env() {
     }
 }
 
+/// Where a desktop's own commands live on the distributions this runs on.
+/// A process started from a systemd user service or an MCP client can inherit
+/// a PATH with none of them.
+const COMMON_COMMAND_PATHS: [&str; 4] = [
+    "/run/current-system/sw/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+];
+
 fn hydrate_common_command_path() {
     let mut entries = env::var_os("PATH")
         .map(|path| env::split_paths(&path).collect::<Vec<_>>())
         .unwrap_or_default();
-    for path in [
-        "/run/current-system/sw/bin",
-        "/usr/local/bin",
-        "/usr/bin",
-        "/bin",
-    ] {
-        let path = PathBuf::from(path);
-        if path.exists() && !entries.iter().any(|entry| entry == &path) {
-            entries.push(path);
-        }
+    let candidates = COMMON_COMMAND_PATHS
+        .iter()
+        .map(PathBuf::from)
+        .filter(|path| path.exists())
+        .collect::<Vec<_>>();
+    let additions = command_path_additions(&entries, &candidates);
+    if additions.is_empty() {
+        return;
     }
+
+    entries.extend(additions);
     if let Ok(path) = env::join_paths(entries) {
-        // SAFETY: the same promise as the rest of the hydration, stated on
-        // `hydrate_session_bus_env`. Unlike the writes there, this one has no
-        // "already set" guard and repeats on every later call.
+        // SAFETY: see `hydrate_session_bus_env`. This runs once, from the
+        // startup call, before any other thread exists.
         unsafe { env::set_var("PATH", path) };
     }
+}
+
+/// Which of `candidates` are missing from `current`, in the order given.
+///
+/// Empty means PATH already carries them and must not be rewritten. That
+/// distinction is the point: this used to rebuild and rewrite PATH on every
+/// call, which made an unconditional write out of a function whose whole job
+/// is to fill in what is missing.
+fn command_path_additions(current: &[PathBuf], candidates: &[PathBuf]) -> Vec<PathBuf> {
+    candidates
+        .iter()
+        .filter(|candidate| !current.contains(candidate))
+        .cloned()
+        .collect()
 }
 
 fn hydrate_desktop_env_from_process_tree() {
@@ -334,8 +367,8 @@ fn hydrate_desktop_env_from_map(process_env: &HashMap<String, String>) {
         .filter_map(|key| env_var(key).map(|value| ((*key).to_string(), value)))
         .collect();
     for (key, value) in desktop_env_hydration_updates(&current_env, process_env) {
-        // SAFETY: see `hydrate_session_bus_env`. The updates are computed
-        // against the current environment, so a second call produces none.
+        // SAFETY: see `hydrate_session_bus_env`. This runs once, from the
+        // startup call, before any other thread exists.
         unsafe { env::set_var(key, value) };
     }
 }
@@ -1089,6 +1122,32 @@ mod tests {
         );
         assert_eq!(environment.get("EMPTY").map(String::as_str), Some(""));
         assert!(!environment.contains_key("NO_EQUALS"));
+    }
+
+    #[test]
+    fn a_path_that_already_carries_every_candidate_is_not_rewritten() {
+        let current = ["/usr/local/bin", "/usr/bin", "/bin"].map(PathBuf::from);
+        let candidates = ["/usr/bin", "/bin"].map(PathBuf::from);
+
+        assert!(command_path_additions(&current, &candidates).is_empty());
+    }
+
+    #[test]
+    fn only_the_missing_candidates_are_added_in_the_order_given() {
+        let current = ["/usr/bin"].map(PathBuf::from);
+        let candidates = ["/run/current-system/sw/bin", "/usr/bin", "/bin"].map(PathBuf::from);
+
+        assert_eq!(
+            command_path_additions(&current, &candidates),
+            ["/run/current-system/sw/bin", "/bin"].map(PathBuf::from)
+        );
+    }
+
+    #[test]
+    fn an_empty_path_takes_every_candidate() {
+        let candidates = ["/usr/bin", "/bin"].map(PathBuf::from);
+
+        assert_eq!(command_path_additions(&[], &candidates), candidates);
     }
 
     #[test]
