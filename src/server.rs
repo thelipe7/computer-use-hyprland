@@ -764,12 +764,7 @@ impl ComputerUseLinux {
         if env_flag_enabled("COMPUTER_USE_HYPRLAND_DISABLE_ABS_POINTER") {
             return false;
         }
-        if self
-            .abs_pointer
-            .lock()
-            .map(|g| g.is_some())
-            .unwrap_or(false)
-        {
+        if self.abs_pointer.lock().is_ok_and(|g| g.is_some()) {
             return true;
         }
         let Ok(cap) = capture_screenshot_raw().await else {
@@ -1894,7 +1889,7 @@ fn allowed_app_patterns(value: Option<&str>) -> Option<Vec<String>> {
 }
 
 /// A window is allowed when any pattern is a case-insensitive substring of
-/// its app_id, wm_class, or title.
+/// its `app_id`, `wm_class`, or title.
 fn window_matches_allowlist(window: &WindowInfo, patterns: &[String]) -> bool {
     let haystacks = [
         window.app_id.as_deref(),
@@ -2329,8 +2324,8 @@ struct AppCandidate {
 struct GetAppStateParams {
     #[serde(default)]
     app_name_or_bundle_identifier: Option<String>,
-    /// Which window to act on: window_id, pid, app_id, wm_class, title, or a
-    /// terminal selector (tty, terminal_pid, terminal_command, terminal_cwd).
+    /// Which window to act on: `window_id`, pid, `app_id`, `wm_class`, title, or a
+    /// terminal selector (tty, `terminal_pid`, `terminal_command`, `terminal_cwd`).
     #[serde(flatten)]
     target: ActivateWindowParams,
     /// Maximum raw AT-SPI nodes to inspect before compaction (default 1000, hard max 2000).
@@ -2385,8 +2380,8 @@ impl GetAppStateParams {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct ScreenshotParams {
-    /// Which window to act on: window_id, pid, app_id, wm_class, title, or a
-    /// terminal selector (tty, terminal_pid, terminal_command, terminal_cwd).
+    /// Which window to act on: `window_id`, pid, `app_id`, `wm_class`, title, or a
+    /// terminal selector (tty, `terminal_pid`, `terminal_command`, `terminal_cwd`).
     #[serde(flatten)]
     target: ActivateWindowParams,
     /// Raise the targeted window before capture (default true). Ignored without
@@ -2542,8 +2537,8 @@ struct PointerPositionOutput {
 struct WaitForParams {
     #[serde(default)]
     app_name_or_bundle_identifier: Option<String>,
-    /// Which window to act on: window_id, pid, app_id, wm_class, title, or a
-    /// terminal selector (tty, terminal_pid, terminal_command, terminal_cwd).
+    /// Which window to act on: `window_id`, pid, `app_id`, `wm_class`, title, or a
+    /// terminal selector (tty, `terminal_pid`, `terminal_command`, `terminal_cwd`).
     #[serde(flatten)]
     target: ActivateWindowParams,
     /// Element predicate: role of the awaited element (substring, case-insensitive).
@@ -2680,8 +2675,8 @@ struct GetAppStateOutput {
 struct ClickParams {
     #[serde(default)]
     element_index: Option<u32>,
-    /// The `object_ref` string of a node from the latest get_app_state result,
-    /// as an alternative to element_index.
+    /// The `object_ref` string of a node from the latest `get_app_state` result,
+    /// as an alternative to `element_index`.
     #[serde(default)]
     object_ref: Option<String>,
     #[serde(default)]
@@ -2701,15 +2696,15 @@ struct ClickParams {
     #[serde(default)]
     click_count: Option<u32>,
     /// Modifier keys held around the pointer click (ctrl/alt/shift/meta, the
-    /// press_key names). Forces the pointer path even when the element has an
+    /// `press_key` names). Forces the pointer path even when the element has an
     /// AT-SPI click action.
     #[serde(default)]
     modifiers: Vec<String>,
     // Optional window target: when set, the window is raised/focused before the
     // click so a coordinate click reliably lands on the intended app rather than
     // whatever window happens to be stacked on top at that pixel.
-    /// Which window to act on: window_id, pid, app_id, wm_class, title, or a
-    /// terminal selector (tty, terminal_pid, terminal_command, terminal_cwd).
+    /// Which window to act on: `window_id`, pid, `app_id`, `wm_class`, title, or a
+    /// terminal selector (tty, `terminal_pid`, `terminal_command`, `terminal_cwd`).
     #[serde(flatten)]
     target: ActivateWindowParams,
     /// Interpret `x`/`y` as relative to the targeted window's top-left corner
@@ -2738,8 +2733,8 @@ impl ClickParams {
 struct ActionParams {
     #[serde(default)]
     element_index: Option<u32>,
-    /// The `object_ref` string of a node from the latest get_app_state result,
-    /// as an alternative to element_index.
+    /// The `object_ref` string of a node from the latest `get_app_state` result,
+    /// as an alternative to `element_index`.
     #[serde(default)]
     object_ref: Option<String>,
     #[serde(default)]
@@ -2771,8 +2766,8 @@ impl ActionParams {
 struct SetValueParams {
     #[serde(default)]
     element_index: Option<u32>,
-    /// The `object_ref` string of a node from the latest get_app_state result,
-    /// as an alternative to element_index.
+    /// The `object_ref` string of a node from the latest `get_app_state` result,
+    /// as an alternative to `element_index`.
     #[serde(default)]
     object_ref: Option<String>,
     #[serde(default)]
@@ -2812,8 +2807,8 @@ struct ScrollParams {
     pages: Option<f64>,
     // Optional window target (parity with click): the window is raised/focused
     // before scrolling so the wheel events land on the intended app.
-    /// Which window to act on: window_id, pid, app_id, wm_class, title, or a
-    /// terminal selector (tty, terminal_pid, terminal_command, terminal_cwd).
+    /// Which window to act on: `window_id`, pid, `app_id`, `wm_class`, title, or a
+    /// terminal selector (tty, `terminal_pid`, `terminal_command`, `terminal_cwd`).
     #[serde(flatten)]
     target: ActivateWindowParams,
     /// Interpret `x`/`y` as relative to the targeted window's top-left corner
@@ -2843,14 +2838,14 @@ struct DragParams {
     end_x: Option<i32>,
     #[serde(default)]
     end_y: Option<i32>,
-    /// Drag from the center of this element, from the latest get_app_state
+    /// Drag from the center of this element, from the latest `get_app_state`
     /// tree, instead of `start_x`/`start_y`.
     #[serde(default)]
     start_element_index: Option<u32>,
     /// Drag to the center of this element instead of `end_x`/`end_y`.
     #[serde(default)]
     end_element_index: Option<u32>,
-    /// Modifier keys held around the drag (ctrl/alt/shift/meta, the press_key
+    /// Modifier keys held around the drag (ctrl/alt/shift/meta, the `press_key`
     /// names).
     #[serde(default)]
     modifiers: Vec<String>,
@@ -2861,8 +2856,8 @@ struct DragParams {
     relative: Option<bool>,
     // Optional window target: the window is raised/focused before the drag, so
     // it lands on the intended app rather than whatever is stacked on top.
-    /// Which window to act on: window_id, pid, app_id, wm_class, title, or a
-    /// terminal selector (tty, terminal_pid, terminal_command, terminal_cwd).
+    /// Which window to act on: `window_id`, pid, `app_id`, `wm_class`, title, or a
+    /// terminal selector (tty, `terminal_pid`, `terminal_command`, `terminal_cwd`).
     #[serde(flatten)]
     target: ActivateWindowParams,
 }
@@ -2882,8 +2877,8 @@ struct PressKeyParams {
     /// them. Exactly one of `key` and `keys` must be given.
     #[serde(default)]
     keys: Vec<String>,
-    /// Which window to act on: window_id, pid, app_id, wm_class, title, or a
-    /// terminal selector (tty, terminal_pid, terminal_command, terminal_cwd).
+    /// Which window to act on: `window_id`, pid, `app_id`, `wm_class`, title, or a
+    /// terminal selector (tty, `terminal_pid`, `terminal_command`, `terminal_cwd`).
     #[serde(flatten)]
     target: ActivateWindowParams,
 }
@@ -2891,8 +2886,8 @@ struct PressKeyParams {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct TypeTextParams {
     text: String,
-    /// Which window to act on: window_id, pid, app_id, wm_class, title, or a
-    /// terminal selector (tty, terminal_pid, terminal_command, terminal_cwd).
+    /// Which window to act on: `window_id`, pid, `app_id`, `wm_class`, title, or a
+    /// terminal selector (tty, `terminal_pid`, `terminal_command`, `terminal_cwd`).
     #[serde(flatten)]
     target: ActivateWindowParams,
 }
@@ -3167,7 +3162,7 @@ impl ComputerUseLinux {
         }
     }
 
-    /// One evaluation of every wait_for predicate. Stops at the first one
+    /// One evaluation of every `wait_for` predicate. Stops at the first one
     /// that does not hold and says why; a satisfied probe carries the matched
     /// element and has already cached the tree it came from.
     async fn probe_wait_predicates(
@@ -3197,9 +3192,7 @@ impl ComputerUseLinux {
             if !title_contains(title, needle) {
                 probe.error = Some(format!(
                     "window title {} does not contain {needle:?}",
-                    title
-                        .map(|title| format!("{title:?}"))
-                        .unwrap_or_else(|| "(none)".to_string())
+                    title.map_or_else(|| "(none)".to_string(), |title| format!("{title:?}"))
                 ));
                 return probe;
             }
@@ -3340,14 +3333,14 @@ impl ComputerUseLinux {
         // Hyprland window bounds are already mapped into capture space by the
         // backend, so the captured desktop rectangle is the right yardstick.
         let rects = vec![self.capture_space_rect().await?];
-        let (w, h) = (bounds.width as i64, bounds.height as i64);
+        let (w, h) = (i64::from(bounds.width), i64::from(bounds.height));
         let window_area = w * h;
         let mut visible_area = 0_i64;
         for (mx, my, mw, mh) in &rects {
-            let ix = (x as i64).max(*mx as i64);
-            let iy = (y as i64).max(*my as i64);
-            let ix2 = (x as i64 + w).min(*mx as i64 + *mw as i64);
-            let iy2 = (y as i64 + h).min(*my as i64 + *mh as i64);
+            let ix = i64::from(x).max(i64::from(*mx));
+            let iy = i64::from(y).max(i64::from(*my));
+            let ix2 = (i64::from(x) + w).min(i64::from(*mx) + i64::from(*mw));
+            let iy2 = (i64::from(y) + h).min(i64::from(*my) + i64::from(*mh));
             if ix2 > ix && iy2 > iy {
                 // Overlapping monitors are rare; treating them as additive keeps
                 // this a cheap best-effort heuristic.
@@ -3532,7 +3525,7 @@ impl ComputerUseLinux {
     }
 
     /// Feedback appended after an action landed: the focused element (as
-    /// press_key reports it) and, for an element action, the states that
+    /// `press_key` reports it) and, for an element action, the states that
     /// changed on that element.
     async fn post_action_notes(
         &self,
@@ -3552,7 +3545,7 @@ impl ComputerUseLinux {
     }
 
     /// A cached element with the `focusable` and `editable` states can take
-    /// typed text even without the Value or EditableText interfaces.
+    /// typed text even without the Value or `EditableText` interfaces.
     fn cached_node_is_keyboard_editable(&self, object_ref: &str) -> bool {
         let states = self.cached_node_states(object_ref);
         ["focusable", "editable"]
@@ -3560,8 +3553,8 @@ impl ComputerUseLinux {
             .all(|wanted| states.iter().any(|state| normalized_equals(state, wanted)))
     }
 
-    /// set_value through the keyboard: focus the element with AT-SPI
-    /// GrabFocus, select everything with Ctrl+A, then type the value.
+    /// `set_value` through the keyboard: focus the element with AT-SPI
+    /// `GrabFocus`, select everything with Ctrl+A, then type the value.
     async fn keyboard_set_value(
         &self,
         object_ref: &str,
@@ -4587,8 +4580,7 @@ fn env_flag_enabled(key: &str) -> bool {
 fn data_url_payload(data_url: &str) -> String {
     data_url
         .split_once(',')
-        .map(|(_, payload)| payload)
-        .unwrap_or(data_url)
+        .map_or(data_url, |(_, payload)| payload)
         .to_string()
 }
 
@@ -5174,9 +5166,7 @@ where
     Fut: Future<Output = std::result::Result<Output, String>>,
 {
     let available = if program.components().count() > 1 {
-        std::fs::metadata(program)
-            .map(|meta| meta.is_file())
-            .unwrap_or(false)
+        std::fs::metadata(program).is_ok_and(|meta| meta.is_file())
     } else {
         program.to_str().is_some_and(which_in_path)
     };
@@ -5225,9 +5215,7 @@ fn which_in_path(binary: &str) -> bool {
     };
     env::split_paths(&path).any(|dir| {
         let candidate = dir.join(binary);
-        std::fs::metadata(&candidate)
-            .map(|meta| meta.is_file())
-            .unwrap_or(false)
+        std::fs::metadata(&candidate).is_ok_and(|meta| meta.is_file())
     })
 }
 
@@ -5337,7 +5325,7 @@ fn key_sequence(key: &str) -> Option<Vec<String>> {
     Some(events)
 }
 
-/// The keys press_key sends, from exactly one of `key` and `keys`.
+/// The keys `press_key` sends, from exactly one of `key` and `keys`.
 fn press_key_sequence(
     key: Option<&str>,
     keys: &[String],

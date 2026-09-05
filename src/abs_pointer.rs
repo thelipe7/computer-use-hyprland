@@ -3,7 +3,7 @@
 //! ydotool's virtual device is relative-only (`EV=7`: SYN|KEY|REL), so its
 //! `--absolute` is faked as "pin-to-corner + relative move", which the
 //! compositor then distorts with pointer acceleration and fractional display
-//! scaling — clicks land in the wrong place on multi-monitor / HiDPI setups.
+//! scaling — clicks land in the wrong place on multi-monitor / `HiDPI` setups.
 //!
 //! Here we create our own uinput device that exposes a true `ABS_X`/`ABS_Y`
 //! axis whose range equals the **logical desktop size** (the same coordinate

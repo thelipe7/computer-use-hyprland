@@ -312,15 +312,15 @@ fn target_dimensions(
     height: u32,
     options: ResolvedScreenshotPayloadOptions,
 ) -> (u32, u32) {
-    let width_scale = options.max_width as f64 / width as f64;
-    let height_scale = options.max_height as f64 / height as f64;
+    let width_scale = f64::from(options.max_width) / f64::from(width);
+    let height_scale = f64::from(options.max_height) / f64::from(height);
     let scale = f64::from(options.scale)
         .min(width_scale)
         .min(height_scale)
         .min(1.0);
 
-    let target_width = ((width as f64 * scale).round() as u32).clamp(1, width);
-    let target_height = ((height as f64 * scale).round() as u32).clamp(1, height);
+    let target_width = ((f64::from(width) * scale).round() as u32).clamp(1, width);
+    let target_height = ((f64::from(height) * scale).round() as u32).clamp(1, height);
     (target_width, target_height)
 }
 
@@ -398,8 +398,8 @@ fn next_dimensions_for_byte_cap(
     max_bytes: usize,
 ) -> (u32, u32) {
     let shrink = ((max_bytes as f64 / encoded_bytes as f64).sqrt() * 0.9).clamp(0.1, 0.95);
-    let mut next_width = ((width as f64 * shrink).floor() as u32).max(1);
-    let mut next_height = ((height as f64 * shrink).floor() as u32).max(1);
+    let mut next_width = ((f64::from(width) * shrink).floor() as u32).max(1);
+    let mut next_height = ((f64::from(height) * shrink).floor() as u32).max(1);
 
     if next_width >= width && width > 1 {
         next_width = width - 1;

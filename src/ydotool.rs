@@ -157,11 +157,13 @@ pub(crate) fn ensure_supported() -> Result<SupportedYdotool, String> {
     let key = executable
         .as_deref()
         .and_then(executable_fingerprint)
-        .map(ProbeCacheKey::Executable)
-        .unwrap_or_else(|| ProbeCacheKey::SearchPath {
-            path: search_path,
-            current_dir,
-        });
+        .map_or_else(
+            || ProbeCacheKey::SearchPath {
+                path: search_path,
+                current_dir,
+            },
+            ProbeCacheKey::Executable,
+        );
     cached_result_or_probe(
         SUPPORTED.get_or_init(|| Mutex::new(None)),
         key,

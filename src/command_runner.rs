@@ -258,7 +258,7 @@ async fn supervise_command(
         tokio::pin!(command_completion);
         tokio::select! {
             result = &mut command_completion => Completion::Finished(result),
-            _ = tokio::time::sleep_until(deadline) => Completion::Timeout,
+            () = tokio::time::sleep_until(deadline) => Completion::Timeout,
             _ = &mut cancel_rx => Completion::Cancelled,
         }
     };

@@ -292,9 +292,7 @@ pub async fn activate_window(window_id: u64) -> Result<()> {
 
 /// True when this process runs inside a Hyprland session it can reach.
 pub fn is_active() -> bool {
-    std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty())
+    std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok_and(|value| !value.trim().is_empty())
         || infer_hyprland_instance_signature().is_some()
 }
 
@@ -657,9 +655,8 @@ fn lua_focus_dispatch(address: &str) -> String {
 
 fn hyprctl_output(args: &[&str]) -> std::io::Result<std::process::Output> {
     let mut command = StdCommand::new("hyprctl");
-    let has_signature = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty());
+    let has_signature =
+        std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok_and(|value| !value.trim().is_empty());
     if !has_signature && let Some(signature) = infer_hyprland_instance_signature() {
         command.args(["-i", &signature]);
     }
@@ -668,9 +665,8 @@ fn hyprctl_output(args: &[&str]) -> std::io::Result<std::process::Output> {
 
 async fn hyprctl_output_async(args: &[&str]) -> Result<std::process::Output> {
     let mut command = Command::new("hyprctl");
-    let has_signature = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty());
+    let has_signature =
+        std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok_and(|value| !value.trim().is_empty());
     if !has_signature && let Some(signature) = infer_hyprland_instance_signature() {
         command.args(["-i", &signature]);
     }
@@ -703,8 +699,7 @@ fn hyprland_instance_candidate(
     if !path
         .join(".socket.sock")
         .metadata()
-        .map(|metadata| metadata.file_type().is_socket())
-        .unwrap_or(false)
+        .is_ok_and(|metadata| metadata.file_type().is_socket())
     {
         return None;
     }
@@ -912,7 +907,7 @@ mod tests {
         }]"#;
 
         for monitors in [
-            br#"[]"#.as_slice(),
+            br"[]".as_slice(),
             br#"[{"id":7,"x":0,"y":0,"scale":0.0}]"#.as_slice(),
             b"not json".as_slice(),
         ] {

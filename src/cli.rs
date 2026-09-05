@@ -95,8 +95,9 @@ pub(crate) async fn run_from_env() -> Result<()> {
                 Ok(windows) => {
                     let backend = windows
                         .first()
-                        .map(|window| window.backend.as_str())
-                        .unwrap_or(windowing::HYPRLAND_BACKEND);
+                        .map_or(windowing::HYPRLAND_BACKEND, |window| {
+                            window.backend.as_str()
+                        });
                     serde_json::json!({
                         "backend": backend,
                         "windows": windows,
@@ -117,7 +118,7 @@ pub(crate) async fn run_from_env() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
-        Some("--help") | Some("-h") => {
+        Some("--help" | "-h") => {
             print_help();
             Ok(())
         }

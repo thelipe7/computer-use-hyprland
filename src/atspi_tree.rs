@@ -372,7 +372,7 @@ async fn root_pids(conn: &zbus::Connection, roots: &[ObjectRefOwned]) -> Vec<u32
 }
 
 /// Compact description of the AT-SPI element that currently holds keyboard
-/// focus, used as post-input feedback for type_text/press_key.
+/// focus, used as post-input feedback for `type_text/press_key`.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct FocusedElementSummary {
     pub role: String,
@@ -470,7 +470,7 @@ pub async fn perform_action(
 
 /// True when the error says the AT-SPI object's owner is gone from the bus:
 /// the app restarted or the window closed, so every cached object ref of that
-/// tree is dead and only a fresh get_app_state can recover.
+/// tree is dead and only a fresh `get_app_state` can recover.
 pub fn is_stale_object_error(error: &anyhow::Error) -> bool {
     const STALE_MARKERS: [&str; 5] = [
         "ServiceUnknown",
@@ -626,7 +626,7 @@ async fn select_roots(
     let needle = app_name_or_bundle_identifier
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase());
+        .map(str::to_ascii_lowercase);
     let dbus = DBusProxy::new(conn.connection()).await.ok();
     let mut remaining = roots;
 
@@ -770,8 +770,7 @@ async fn role_name(proxy: &AccessibleProxy<'_>) -> String {
     proxy
         .get_role()
         .await
-        .map(|role| format!("{role:?}"))
-        .unwrap_or_else(|_| "unknown".to_string())
+        .map_or_else(|_| "unknown".to_string(), |role| format!("{role:?}"))
 }
 
 async fn bounds(proxy: &AccessibleProxy<'_>) -> Option<Bounds> {
@@ -970,7 +969,7 @@ fn select_action_index(actions: &[atspi::Action], requested_action: Option<&str>
         ));
     }
 
-    Ok(if actions.len() > 1 { 1 } else { 0 })
+    Ok(i32::from(actions.len() > 1))
 }
 
 fn optional_string(value: Option<String>) -> Option<String> {

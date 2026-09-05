@@ -82,7 +82,7 @@ pub struct PlatformReport {
 pub struct PortalReport {
     pub desktop_portal: Check,
     /// The only portal interface this build uses: screenshots. Input goes
-    /// through uinput, not through the RemoteDesktop portal, which Hyprland's
+    /// through uinput, not through the `RemoteDesktop` portal, which Hyprland's
     /// portal does not implement.
     pub screenshot: Check,
 }
@@ -285,7 +285,7 @@ fn hydrate_session_bus_env_once() {
                 env::set_var(
                     "DBUS_SESSION_BUS_ADDRESS",
                     format!("unix:path={}", bus.display()),
-                )
+                );
             };
         }
     }
@@ -459,9 +459,7 @@ fn process_owner_matches_current_user(pid: u32) -> bool {
     let Some(current_uid) = user_id().and_then(|uid| uid.parse::<u32>().ok()) else {
         return false;
     };
-    fs::metadata(format!("/proc/{pid}"))
-        .ok()
-        .is_some_and(|metadata| metadata.uid() == current_uid)
+    fs::metadata(format!("/proc/{pid}")).is_ok_and(|metadata| metadata.uid() == current_uid)
 }
 
 fn process_env_has_graphical_display(process_env: &HashMap<String, String>) -> bool {
@@ -608,8 +606,10 @@ fn windowing_report() -> WindowingReport {
     let hyprland = probes
         .iter()
         .find(|probe| probe.id == HYPRLAND_BACKEND)
-        .map(check_from_backend_probe)
-        .unwrap_or_else(|| Check::fail("backend probe did not run"));
+        .map_or_else(
+            || Check::fail("backend probe did not run"),
+            check_from_backend_probe,
+        );
     let backends = probes
         .iter()
         .map(|probe| (probe.id.to_string(), check_from_backend_probe(probe)))
@@ -977,7 +977,7 @@ fn run_command(command: &str, args: &[&str], with_session_bus: bool) -> Check {
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let detail = if !stderr.is_empty() { stderr } else { stdout };
+            let detail = if stderr.is_empty() { stdout } else { stderr };
             Check::fail(if detail.is_empty() {
                 format!("exit status {}", output.status)
             } else {
