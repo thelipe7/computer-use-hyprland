@@ -1,0 +1,22 @@
+name: Feature request
+description: Propose a concrete improvement.
+title: "feat: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: This server targets Hyprland. A capability that only makes sense on another compositor is out of scope; see CONTRIBUTING.
+  - type: textarea
+    id: need
+    attributes:
+      label: User need
+      description: What problem would this solve, and for whom?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed outcome
+      description: Describe the observable behavior, including alternatives considered. If it adds or changes an MCP tool, say what the caller would send and what would come back.
+    validations:
+      required: true

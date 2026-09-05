@@ -1,0 +1,43 @@
+name: Bug report
+description: Report a reproducible problem.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Search existing issues and discussions before reporting a bug.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: The exact steps that produce the problem, in order, starting from a state someone else can reach. Name the tool call and its arguments where one is involved.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: doctor output
+      description: The output of `computer-use-hyprland doctor`, which reports the compositor, the portal, the accessibility bus and the input backends this build found.
+      render: json
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Hyprland version (`hyprctl version`), the distribution, and how this was installed.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: The server writes to stderr; include what the MCP client captured.
+      render: shell

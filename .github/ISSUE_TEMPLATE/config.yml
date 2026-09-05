@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/thelipe7/computer-use-hyprland/discussions
+    about: Ask for help or discuss an idea before filing an issue.
+  - name: Private security report
+    url: https://github.com/thelipe7/computer-use-hyprland/security/advisories/new
+    about: Report a vulnerability privately.
