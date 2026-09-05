@@ -1,70 +1,105 @@
+<div align="center">
+
 # computer-use-hyprland
 
-An MCP server that lets an agent drive this desktop: read the accessibility
-tree, take screenshots, target windows, and send input.
+An MCP server that lets an agent drive a Hyprland desktop: read the
+accessibility tree, take screenshots, target windows, and send input.
 
-This is a hard fork of [agent-sh/computer-use-linux][upstream], narrowed to one
-environment — **Hyprland on Wayland** — because that is the only one the
-maintainer runs and the only one the code can honestly claim to work on. The
-GNOME, KWin, COSMIC, i3 and X11 backends were removed rather than shipped
-untested.
+[![CI](https://img.shields.io/github/actions/workflow/status/thelipe7/computer-use-hyprland/ci.yml?branch=main&label=CI&style=flat-square)](https://github.com/thelipe7/computer-use-hyprland/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/computer-use-hyprland?style=flat-square)](https://crates.io/crates/computer-use-hyprland)
+[![MSRV](https://img.shields.io/badge/rust-1.98.1-blue?style=flat-square)](rust-toolchain.toml)
+[![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
-[upstream]: https://github.com/agent-sh/computer-use-linux
+</div>
 
-## What it runs on
+## What it targets
+
+Hyprland on Wayland, and only that. Not as a limitation to be lifted later —
+it is the design. Windows go through `hyprctl` because that is the interface
+Hyprland exposes, and input is synthesized through `uinput` because Hyprland's
+portal implements no RemoteDesktop interface for anyone to ask.
+
+A server that covered every Linux desktop would offer the intersection of what
+all of them can do. This one takes the union of what one can, which is why it
+can move a window to an exact pixel, and tell you precisely why a tiled one
+refuses.
 
 | Layer | Implementation |
 |---|---|
-| Windows | `hyprctl` (list, focus, move, resize, float, occlusion, pointer position) |
+| Windows | `hyprctl` — list, focus, move, resize, float, occlusion, pointer position |
 | Accessibility | AT-SPI over the session's a11y bus |
-| Screenshots | XDG Desktop Portal `Screenshot` (needs `grim` on the portal's `PATH`) |
+| Screenshots | XDG Desktop Portal `Screenshot`, which needs `grim` on the portal's `PATH` |
 | Pointer | A `uinput` absolute pointer device this server creates |
 | Literal text | `wtype`, the Wayland virtual-keyboard protocol |
 | Keys and chords | `ydotool` through a connectable `ydotoold` socket |
 
-There is no RemoteDesktop portal on Hyprland, and this build does not look for
-one. Everything goes through `uinput`.
-
 ## Install
 
+From the registry:
+
 ```bash
-cargo install --path . --force
+cargo install computer-use-hyprland
 ```
 
-The running server does not reload the binary, so restart the MCP client
-session after reinstalling.
+Or from a clone, which is what you want if you are changing it:
 
-Then check the machine:
+```bash
+git clone https://github.com/thelipe7/computer-use-hyprland
+cd computer-use-hyprland
+cargo install --path .
+```
+
+The pinned toolchain in `rust-toolchain.toml` installs itself on the first
+`cargo` command. An MCP client's server process does not reload the binary, so
+restart the client after installing over a running one.
+
+Then ask the machine what it can do:
 
 ```bash
 computer-use-hyprland doctor
 ```
 
-`readiness.blockers` empty means it is ready. `mcp` is the subcommand an MCP
-client launches; `setup`, `apps`, `state`, `screenshot` and `windows` are for
-poking at the same machinery by hand. `abs-test X Y` clicks that desktop
-coordinate through the uinput pointer and prints where it actually landed
-after clamping, which is the fastest way to tell a coordinate problem from an
-input-backend problem.
+An empty `readiness.blockers` means it is ready.
+
+## Point a client at it
+
+`mcp` is the subcommand an MCP client spawns:
+
+```json
+{
+  "mcpServers": {
+    "computer-use-hyprland": {
+      "command": "computer-use-hyprland",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+The other subcommands drive the same machinery by hand: `doctor`, `setup`,
+`apps`, `state [APP_NAME]`, `screenshot`, `windows`, and `abs-test X Y`, which
+clicks that desktop coordinate through the uinput pointer and prints where it
+actually landed after clamping — the fastest way to tell a coordinate problem
+from an input-backend one.
 
 ## Tools
 
-**Reading:** `doctor`, `list_apps`, `list_windows`, `focused_window`,
+**Reading** — `doctor`, `list_apps`, `list_windows`, `focused_window`,
 `get_app_state`, `wait_for`, `screenshot`, `pointer_position`.
 
-**Windows:** `activate_window`, `move_window`, `resize_window`,
+**Windows** — `activate_window`, `move_window`, `resize_window`,
 `set_window_floating`.
 
-**Input:** `click`, `drag`, `scroll`, `press_key`, `type_text`,
+**Input** — `click`, `drag`, `scroll`, `press_key`, `type_text`,
 `perform_action`, `set_value`.
 
-**Setup:** `setup_accessibility`, only when `doctor` says AT-SPI is off.
+**Setup** — `setup_accessibility`, for when `doctor` says AT-SPI is off.
 
 `run_shell` is registered only when `COMPUTER_USE_HYPRLAND_ENABLE_SHELL=1`.
 
 ### Two things that are easy to get wrong
 
-**Element indices die when the app restarts.** Call `get_app_state` or
+**Element indices die when the application restarts.** Call `get_app_state` or
 `wait_for` again before using an index against a relaunched process.
 
 **Hyprland cannot give a tiled window an exact geometry.** `move_window` and
@@ -78,7 +113,7 @@ resize, then `floating: false` to put the layout back.
 | Variable | Effect |
 |---|---|
 | `COMPUTER_USE_HYPRLAND_ENABLE_SHELL=1` | Registers `run_shell`. Off by default; the command is not sandboxed. |
-| `COMPUTER_USE_HYPRLAND_ALLOWED_APPS` | Comma-separated `app_id`/`wm_class`/`title` patterns. Input tools refuse windows matching none of them. |
+| `COMPUTER_USE_HYPRLAND_ALLOWED_APPS` | Comma-separated `app_id`/`wm_class`/`title` patterns. Input tools refuse a window matching none of them. |
 | `COMPUTER_USE_HYPRLAND_FORCE_YDOTOOL_KEYBOARD=1` | Skips `wtype` and sends literal text through ydotool. |
 | `COMPUTER_USE_HYPRLAND_DISABLE_ABS_POINTER=1` | Skips the uinput absolute pointer, leaving ydotool for the pointer too. |
 
@@ -87,7 +122,7 @@ resize, then `floating: false` to put the layout back.
 Only one process may hold the input lock at a time; a second server answers
 `ok=false` naming the holder's pid.
 
-Electron apps expose no AT-SPI tree unless launched with
+Electron applications expose no AT-SPI tree unless launched with
 `--force-renderer-accessibility`.
 
 A screenshot denied with response 2 usually means the Hyprland portal started
@@ -97,7 +132,21 @@ without `grim` on its `PATH`:
 systemctl --user restart xdg-desktop-portal-hyprland.service xdg-desktop-portal.service
 ```
 
+`examples/atspi_probe.rs` prints the real error chain behind a failed AT-SPI
+connection, which is the one diagnosis `doctor` reduces to a yes or a no:
+
+```bash
+cargo run --example atspi_probe
+```
+
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md) holds every rule this project has. Security
+reports go through the process in [SECURITY.md](SECURITY.md), not through an
+issue.
+
 ## License
 
-MIT. See [LICENSE](LICENSE); the upstream copyright notice is preserved there
-as the license requires.
+MIT. See [LICENSE](LICENSE); this is a hard fork of
+[agent-sh/computer-use-linux](https://github.com/agent-sh/computer-use-linux),
+whose copyright notice is preserved there as the license requires.
