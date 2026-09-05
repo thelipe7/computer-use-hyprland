@@ -674,7 +674,7 @@ fn readiness_report(
         "Enable a keyboard-capable input backend: install wtype, or start ydotoold with a socket accessible to this desktop user."
             .to_string()
     } else {
-        "Computer Use is ready: AT-SPI tree support, window targeting, and a Linux input backend are available."
+        "Computer Use is ready: AT-SPI tree support, window targeting, and a uinput input backend are available."
             .to_string()
     };
 

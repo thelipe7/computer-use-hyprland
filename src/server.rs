@@ -365,7 +365,7 @@ impl ComputerUseLinux {
                     0,
                     Vec::new(),
                     Some(
-                        "GNOME accessibility is disabled; call setup_accessibility first."
+                        "AT-SPI accessibility is disabled; call setup_accessibility first."
                             .to_string(),
                     ),
                 )
@@ -1603,7 +1603,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "press_key",
-        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Pass `key` for one key or chord, or `keys` (an array in the same grammar) to send a sequence in one call with a short delay between entries; exactly one of the two must be given. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app.",
+        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Pass `key` for one key or chord, or `keys` (an array in the same grammar) to send a sequence in one call with a short delay between entries; exactly one of the two must be given. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). Keys and chords are sent through ydotool, which needs a connectable ydotoold socket; `doctor` reports whether there is one. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by Hyprland before reaching the app.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -3407,8 +3407,9 @@ impl ComputerUseLinux {
         }
     }
 
-    /// Shared move/resize plumbing: resolve the window target, run the GNOME
-    /// Shell extension operation, then re-query bounds to report the result.
+    /// Shared move/resize plumbing: resolve the window target, dispatch the
+    /// geometry change through hyprctl, then re-query the bounds to report
+    /// what actually happened rather than what was asked for.
     async fn window_geometry_op<F, Fut>(
         &self,
         received: Option<serde_json::Value>,
