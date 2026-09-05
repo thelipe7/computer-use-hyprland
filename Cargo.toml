@@ -117,3 +117,26 @@ zbus = "5.19.0"
 
 # Dependencies dominate a debug build's runtime here — image decoding, PNG
 # encoding, the base64 of a screenshot — and they rarely change.
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+debug = "line-tables-only"
+# Keeps the symbol table, so a backtrace out of an input path still names
+# functions. `strip = "symbols"` would take that away for a few hundred KiB.
+strip = "debuginfo"
+# Silent wraparound becomes a panic. Every coordinate here is arithmetic over
+# numbers a compositor supplied, and a wrong pixel is worse than a crash.
+overflow-checks = true
+
+# The artifact actually shipped, built by hand from a tag. Slow on purpose:
+# fat LTO with one codegen unit multiplies link time, which is a bad trade on
+# every developer build and a good one on the binary that goes out.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
