@@ -145,7 +145,7 @@ impl ScreenshotPayloadOptions {
 
 /// Environment variable forcing a single capture backend, skipping the
 /// fallback chain. Accepts `gnome-shell`, `portal`, or `gnome-screenshot`.
-const SCREENSHOT_BACKEND_ENV: &str = "COMPUTER_USE_LINUX_SCREENSHOT_BACKEND";
+const SCREENSHOT_BACKEND_ENV: &str = "COMPUTER_USE_HYPRLAND_SCREENSHOT_BACKEND";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScreenshotBackend {

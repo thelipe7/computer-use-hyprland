@@ -24,7 +24,7 @@ const DESKTOP_ENV_KEYS: &[&str] = &[
     "XDG_RUNTIME_DIR",
     "XDG_SESSION_TYPE",
 ];
-const FORCE_YDOTOOL_KEYBOARD_ENV_KEYS: &[&str] = &["COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD"];
+const FORCE_YDOTOOL_KEYBOARD_ENV_KEYS: &[&str] = &["COMPUTER_USE_HYPRLAND_FORCE_YDOTOOL_KEYBOARD"];
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DoctorReport {

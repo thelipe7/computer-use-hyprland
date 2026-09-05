@@ -363,14 +363,14 @@ def main() -> int:
 
     shell_home = tempfile.TemporaryDirectory(prefix="computer-use-hyprland-shell-home-")
     pathlib.Path(shell_home.name, ".profile").write_text(
-        "export COMPUTER_USE_LINUX_PROFILE_SECRET=must-not-be-loaded\n",
+        "export COMPUTER_USE_HYPRLAND_PROFILE_SECRET=must-not-be-loaded\n",
         encoding="utf-8",
     )
     shell_client = McpClient(
         binary,
         {
-            "COMPUTER_USE_LINUX_ENABLE_SHELL": "1",
-            "COMPUTER_USE_LINUX_TEST_SECRET": "must-not-be-inherited",
+            "COMPUTER_USE_HYPRLAND_ENABLE_SHELL": "1",
+            "COMPUTER_USE_HYPRLAND_TEST_SECRET": "must-not-be-inherited",
             "HOME": shell_home.name,
         },
     )
@@ -404,7 +404,7 @@ def main() -> int:
             {
                 "name": SHELL_TOOL,
                 "arguments": {
-                    "command": 'test -z "${COMPUTER_USE_LINUX_TEST_SECRET-}" && test -z "${COMPUTER_USE_LINUX_PROFILE_SECRET-}" && printf %s "$EXPLICIT"',
+                    "command": 'test -z "${COMPUTER_USE_HYPRLAND_TEST_SECRET-}" && test -z "${COMPUTER_USE_HYPRLAND_PROFILE_SECRET-}" && printf %s "$EXPLICIT"',
                     "cwd": str(repo),
                     "env": {"EXPLICIT": "shell-ok"},
                     "timeout_seconds": 5,

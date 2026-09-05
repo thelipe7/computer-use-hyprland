@@ -54,9 +54,9 @@ const WAIT_FOR_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const KEY_SEQUENCE_DELAY: Duration = Duration::from_millis(60);
 /// How long an app gets to react before post-action feedback is read.
 const POST_ACTION_SETTLE: Duration = Duration::from_millis(120);
-const ALLOWED_APPS_ENV: &str = "COMPUTER_USE_LINUX_ALLOWED_APPS";
+const ALLOWED_APPS_ENV: &str = "COMPUTER_USE_HYPRLAND_ALLOWED_APPS";
 const YDOTOOL_TYPE_CHARS_PER_SECOND: u64 = 20;
-const SHELL_ENABLE_ENV: &str = "COMPUTER_USE_LINUX_ENABLE_SHELL";
+const SHELL_ENABLE_ENV: &str = "COMPUTER_USE_HYPRLAND_ENABLE_SHELL";
 const SHELL_DEFAULT_TIMEOUT_SECS: u64 = 30;
 const SHELL_MAX_TIMEOUT_SECS: u64 = 120;
 const SHELL_MAX_COMMAND_BYTES: usize = 64 * 1024;
@@ -759,9 +759,9 @@ impl ComputerUseLinux {
 
     /// Lazily create the uinput absolute pointer, sizing its ABS range to the
     /// logical desktop (the portal screenshot dimensions). Returns `false` if it
-    /// can't be created or is disabled via `CU_DISABLE_ABS_POINTER`.
+    /// can't be created or is disabled via `COMPUTER_USE_HYPRLAND_DISABLE_ABS_POINTER`.
     async fn ensure_abs_pointer(&self) -> bool {
-        if env_flag_enabled("CU_DISABLE_ABS_POINTER") {
+        if env_flag_enabled("COMPUTER_USE_HYPRLAND_DISABLE_ABS_POINTER") {
             return false;
         }
         if self
@@ -1707,7 +1707,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "run_shell",
-        description = "Execute one explicitly approved /bin/sh command with same-user host authority. This tool is absent unless the server operator starts computer-use-hyprland with COMPUTER_USE_LINUX_ENABLE_SHELL=1. It is not sandboxed: the command can read or modify files and use the network with the server user's permissions. The inherited environment is cleared to a small desktop/runtime allowlist; pass any additional variables explicitly. Execution time and output are bounded: returned streams are truncated to 512 KiB, while a stream exceeding the 8 MiB collection ceiling fails the call without returning partial output. An audit digest is written to server stderr.",
+        description = "Execute one explicitly approved /bin/sh command with same-user host authority. This tool is absent unless the server operator starts computer-use-hyprland with COMPUTER_USE_HYPRLAND_ENABLE_SHELL=1. It is not sandboxed: the command can read or modify files and use the network with the server user's permissions. The inherited environment is cleared to a small desktop/runtime allowlist; pass any additional variables explicitly. Execution time and output are bounded: returned streams are truncated to 512 KiB, while a stream exceeding the 8 MiB collection ceiling fails the call without returning partial output. An audit digest is written to server stderr.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1873,11 +1873,11 @@ impl ComputerUseLinux {
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
     version = "0.6.0",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. This server drives one desktop: Hyprland on Wayland. Windows come from hyprctl, the accessibility tree from AT-SPI, screenshots from the XDG Screenshot portal, and every input event from uinput -- an absolute pointer device for click, scroll and drag, wtype for literal text, and ydotool for keys and chords. There is no RemoteDesktop portal on Hyprland and this build does not look for one. Use list_windows/focused_window before targeted keyboard input. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. A window-targeted screenshot raises the window first; with raise_window=false the caption lists occluded_by so overlapping pixels are not mistaken for the target's own. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action and set_value can also use semantic role/name/text/states selectors when the target is unique. A plain left click on an element that exposes an AT-SPI click action invokes that action and never moves the pointer; the message says which path ran. Every window-targeted tool takes the same nine selectors -- window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, terminal_cwd -- and they refuse targeted input if focus cannot be verified. click, scroll and drag also accept relative coordinates, and drag accepts start_element_index/end_element_index; each reports the desktop point every end resolved to. On wait_for, window_title is a predicate, not a selector: the substring the target window's title must contain. After click, drag, perform_action, press_key and type_text, results append focused-element feedback from AT-SPI (role, name, editable, states) and warn when no editable element holds focus after typing -- treat that warning as the input not landing; element clicks and actions also report the element's states before -> after when they changed. When an element operation answers that the cached accessibility tree is stale, call get_app_state again before retrying. wait_for polls until an element selector, a window title substring, or a focused window holds and returns the element with its index in a freshly cached tree. pointer_position reports the pointer's desktop coordinates. Hyprland cannot give a tiled window an exact geometry, so move_window and resize_window refuse one without dispatching anything; call set_window_floating with floating=true, retry, then set_window_floating with floating=false to restore the layout. The first input action of this process takes a machine-wide session lock; another server process gets ok=false naming the holder's pid. When COMPUTER_USE_LINUX_ALLOWED_APPS is set, input tools refuse windows matching none of its app_id/wm_class/title patterns. Screenshot, click and input results warn when the target window or coordinate is partially or fully off-screen. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
+    instructions = "Begin every turn that uses Computer Use by calling get_app_state. This server drives one desktop: Hyprland on Wayland. Windows come from hyprctl, the accessibility tree from AT-SPI, screenshots from the XDG Screenshot portal, and every input event from uinput -- an absolute pointer device for click, scroll and drag, wtype for literal text, and ydotool for keys and chords. There is no RemoteDesktop portal on Hyprland and this build does not look for one. Use list_windows/focused_window before targeted keyboard input. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. A window-targeted screenshot raises the window first; with raise_window=false the caption lists occluded_by so overlapping pixels are not mistaken for the target's own. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action and set_value can also use semantic role/name/text/states selectors when the target is unique. A plain left click on an element that exposes an AT-SPI click action invokes that action and never moves the pointer; the message says which path ran. Every window-targeted tool takes the same nine selectors -- window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, terminal_cwd -- and they refuse targeted input if focus cannot be verified. click, scroll and drag also accept relative coordinates, and drag accepts start_element_index/end_element_index; each reports the desktop point every end resolved to. On wait_for, window_title is a predicate, not a selector: the substring the target window's title must contain. After click, drag, perform_action, press_key and type_text, results append focused-element feedback from AT-SPI (role, name, editable, states) and warn when no editable element holds focus after typing -- treat that warning as the input not landing; element clicks and actions also report the element's states before -> after when they changed. When an element operation answers that the cached accessibility tree is stale, call get_app_state again before retrying. wait_for polls until an element selector, a window title substring, or a focused window holds and returns the element with its index in a freshly cached tree. pointer_position reports the pointer's desktop coordinates. Hyprland cannot give a tiled window an exact geometry, so move_window and resize_window refuse one without dispatching anything; call set_window_floating with floating=true, retry, then set_window_floating with floating=false to restore the layout. The first input action of this process takes a machine-wide session lock; another server process gets ok=false naming the holder's pid. When COMPUTER_USE_HYPRLAND_ALLOWED_APPS is set, input tools refuse windows matching none of its app_id/wm_class/title patterns. Screenshot, click and input results warn when the target window or coordinate is partially or fully off-screen. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
 )]
 impl ServerHandler for ComputerUseLinux {}
 
-/// The `COMPUTER_USE_LINUX_ALLOWED_APPS` patterns, or `None` when the
+/// The `COMPUTER_USE_HYPRLAND_ALLOWED_APPS` patterns, or `None` when the
 /// variable is unset or blank (no restriction).
 fn allowed_app_patterns(value: Option<&str>) -> Option<Vec<String>> {
     let patterns = value?
@@ -2928,7 +2928,7 @@ impl ComputerUseLinux {
 
     fn should_prefer_wtype_keyboard(&self) -> bool {
         prefer_wtype_keyboard(
-            env_flag_enabled("COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD"),
+            env_flag_enabled("COMPUTER_USE_HYPRLAND_FORCE_YDOTOOL_KEYBOARD"),
             self.is_wayland_session(),
             crate::diagnostics::wtype_compatible_wayland_desktop(
                 env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
@@ -3088,7 +3088,7 @@ impl ComputerUseLinux {
     }
 
     /// Every input tool passes here first: the machine-wide session lock, then
-    /// the `COMPUTER_USE_LINUX_ALLOWED_APPS` check against the window the
+    /// the `COMPUTER_USE_HYPRLAND_ALLOWED_APPS` check against the window the
     /// action targets (the focused window when it targets none).
     async fn input_gate(
         &self,
