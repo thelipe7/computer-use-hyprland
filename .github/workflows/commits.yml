@@ -1,0 +1,148 @@
+name: Commits
+
+# What CONTRIBUTING asks of every commit, and a requirement nothing checks is
+# a request. Two things are asked, and they are checked in one pass because
+# they are asked of the same object: a Conventional Commit subject, and a
+# `Signed-off-by` trailer certifying the Developer Certificate of Origin, the
+# only thing this project asks a contributor to agree to.
+#
+# The commits are the load-bearing half: this repository merges by rebase, so
+# each one lands as written, and the changelog is written from those subjects.
+# A change that does not say `feat` is a feature nobody is told about, and a
+# break without `!` ships as a patch.
+#
+# The title is checked too, in its own job: it is what the pull request list
+# and every link to this change are read as, it needs no clone, and it is what
+# would become the commit if this repository ever merged by squash.
+on:
+  pull_request:
+    # `edited` because a title can be rewritten after the pull request is
+    # opened, and the check has to run again when it is.
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+# Both jobs are cheap and pull-request-only, and a title can be edited three
+# times in a minute. Cancel the run the edit superseded rather than queue it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# The subject grammar, in one place for both jobs: the types the changelog
+# groups by, and the tail, `type(optional scope)!: description`, with `!`
+# marking a breaking change. Split in two because only the types are also
+# written in prose: adding one here means adding it to CONTRIBUTING too, which
+# is where a contributor looks first, and the first job below fails if the two
+# ever disagree.
+env:
+  TYPES: build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test
+  SUBJECT_TAIL: '(\([a-z0-9][a-z0-9._/-]*\))?!?: .+'
+
+jobs:
+  commits:
+    name: Every commit is well-formed and signed off
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The full history, because the check walks base..head. Without the
+          # blobs: this reads subjects, authors and trailers, never file
+          # contents, and a blobless clone fetches those on demand if
+          # anything asks.
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+
+      # The list above is duplicated in prose, where a contributor reads it
+      # first. Two copies of a rule are one rule and one rumor unless
+      # something fails when they drift.
+      - name: The documented types are the enforced types
+        run: |
+          documented="$(tr '\n' ' ' < CONTRIBUTING.md \
+            | grep -oE 'The types are [^.]+\.' \
+            | grep -oE '`[a-z]+`' | tr -d '`' | sort -u | paste -sd'|' -)"
+          enforced="$(printf '%s' "$TYPES" | tr '|' '\n' | sort -u | paste -sd'|' -)"
+          if [ "$documented" != "$enforced" ]; then
+            echo "::error::CONTRIBUTING and this workflow disagree on the valid types"
+            echo "::error::CONTRIBUTING says: ${documented:-<nothing found>}"
+            echo "::error::this workflow enforces: ${enforced}"
+            exit 1
+          fi
+
+      # One walk of the range, both questions asked of each commit, and every
+      # failure reported. A check that stops at the first one makes the
+      # author fix a five-commit branch five times.
+      - name: Check the subject and the sign-off of each commit
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          # What GitHub says about who opened this pull request, which is the
+          # half of the exemption below that a commit cannot write itself.
+          PR_AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+        run: |
+          pattern="^(${TYPES})${SUBJECT_TAIL}"
+          malformed=0
+          unsigned=0
+          # `--no-merges` because a merge commit carries a message nobody
+          # wrote and the rebase this repository merges by drops it anyway.
+          for commit in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            subject="$(git show --no-patch --format='%s' "$commit")"
+            if ! printf '%s' "$subject" | grep -qE "$pattern"; then
+              echo "::error::$commit, '$subject' is not a Conventional Commit subject"
+              malformed=1
+            fi
+
+            # The DCO certifies a person's right to submit the change. A
+            # GitHub App bot, Dependabot bumping a pin, has no such right to
+            # certify and never signs, and a check that is always red on bot
+            # pull requests teaches people to stop reading it. Both halves
+            # are asked for: an author line is free text whoever wrote the
+            # commit chose, so a `[bot]` address exempts nothing unless GitHub
+            # also says a bot opened the pull request carrying it. The subject
+            # is checked either way: `dependabot.yml` asks it for one, and the
+            # changelog is written off it like any other.
+            author="$(git show --no-patch --format='%ae' "$commit")"
+            if [ "$PR_AUTHOR_TYPE" = "Bot" ]; then
+              case "$author" in *"[bot]@users.noreply.github.com") continue ;; esac
+            fi
+
+            # Signed off *by its author*: a trailer naming somebody else
+            # certifies nothing about the person who wrote the commit.
+            signers="$(git show --no-patch --format='%(trailers:key=Signed-off-by,valueonly)' "$commit")"
+            if ! printf '%s' "$signers" | grep -qiF "<$author>"; then
+              echo "::error::$commit ($subject) carries no Signed-off-by for $author. Amend it with 'git commit -s --amend'"
+              unsigned=1
+            fi
+          done
+          if [ "$malformed" -ne 0 ]; then
+            echo "::error::expected '<type>(<scope>): <description>', where type is one of: ${TYPES//|/, }"
+            echo "::error::mark a breaking change with '!' before the colon, as in 'feat!: drop the v1 format'"
+          fi
+          if [ "$unsigned" -ne 0 ]; then
+            echo "::error::the sign-off certifies the Developer Certificate of Origin: https://developercertificate.org/"
+          fi
+          if [ "$malformed" -ne 0 ] || [ "$unsigned" -ne 0 ]; then
+            exit 1
+          fi
+
+  title:
+    name: The pull request says what it is
+    runs-on: ubuntu-latest
+    # No checkout: the title arrives in the event, and nothing here reads the
+    # tree.
+    steps:
+      - name: Check the title
+        env:
+          # Through the environment, never interpolated into the script. A
+          # title is text somebody else wrote, and `${{ ... }}` would paste it
+          # in before the shell ever saw a quote in it.
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern="^(${TYPES})${SUBJECT_TAIL}"
+          if printf '%s' "$TITLE" | grep -qE "$pattern"; then
+            exit 0
+          fi
+          echo "::error::'$TITLE' is not a Conventional Commit subject"
+          echo "::error::expected '<type>(<scope>): <description>', where type is one of: ${TYPES//|/, }"
+          exit 1
