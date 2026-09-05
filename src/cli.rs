@@ -123,7 +123,7 @@ pub(crate) async fn run_from_env() -> Result<()> {
         }
         Some(command) => {
             anyhow::bail!(
-                "unknown command '{command}'. Expected one of: mcp, doctor, setup, apps, state, screenshot, windows"
+                "unknown command '{command}'. Expected one of: mcp, doctor, setup, apps, state, screenshot, windows, abs-test"
             );
         }
         None => {
@@ -150,7 +150,7 @@ fn abs_test_report(
 
 fn print_help() {
     println!(
-        "computer-use-linux\n\nUsage:\n  computer-use-linux mcp\n  computer-use-linux doctor\n  computer-use-linux setup\n  computer-use-linux apps\n  computer-use-linux state [APP_NAME]\n  computer-use-linux screenshot\n  computer-use-linux windows"
+        "computer-use-linux\n\nUsage:\n  computer-use-linux mcp\n  computer-use-linux doctor\n  computer-use-linux setup\n  computer-use-linux apps\n  computer-use-linux state [APP_NAME]\n  computer-use-linux screenshot\n  computer-use-linux windows\n  computer-use-linux abs-test X Y"
     );
 }
 

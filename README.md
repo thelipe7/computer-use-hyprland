@@ -40,9 +40,12 @@ Then check the machine:
 computer-use-linux doctor
 ```
 
-`readiness.blockers` empty means it is ready. The other subcommands — `mcp`,
-`setup`, `apps`, `state`, `screenshot`, `windows` — are for poking at it by
-hand; `mcp` is the one an MCP client launches.
+`readiness.blockers` empty means it is ready. `mcp` is the subcommand an MCP
+client launches; `setup`, `apps`, `state`, `screenshot` and `windows` are for
+poking at the same machinery by hand. `abs-test X Y` clicks that desktop
+coordinate through the uinput pointer and prints where it actually landed
+after clamping, which is the fastest way to tell a coordinate problem from an
+input-backend problem.
 
 ## Tools
 
