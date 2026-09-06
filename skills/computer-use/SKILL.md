@@ -182,8 +182,14 @@ byte cap, `region` crops, and `format: "jpeg"` with `quality` suits
 photographic content. Pass a window selector to capture one window, and
 `raise_window` when it may be behind another.
 
-`get_app_state` takes `include_screenshot` when both the tree and the picture
-are wanted in one call.
+**`get_app_state` carries a screenshot unless you say otherwise.**
+`include_screenshot` defaults to true, and the image rides in the same result
+as the tree, bounded only by the same generous defaults `screenshot` uses:
+1920 px on the long edge and 2 MB. That is a large block of base64 in a result
+whose interesting half is usually the tree. Pass `include_screenshot: false`
+when the tree is what you came for, and when you do want both, pass the limits
+with it — `max_width`, `max_bytes`, `format: "jpeg"` with `quality`, or a
+window target, which crops the capture to that window.
 
 ## Applications that expose no tree
 
