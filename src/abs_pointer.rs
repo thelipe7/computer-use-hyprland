@@ -174,27 +174,86 @@ impl AbsPointer {
         Ok(landing)
     }
 
-    /// Press at `(start)`, move to `(end)`, release — a drag with `button`.
+    /// Press at `start`, travel to `end` in small steps, release — a drag
+    /// with `button`, reporting where each end landed and how many steps it
+    /// took.
+    ///
+    /// The travel is stepped rather than jumped because a component that
+    /// reacts to the first movement while still under the pointer — a title
+    /// bar handing its window to the compositor, a list reordering itself —
+    /// never sees a single jump whose destination lies outside it.
     pub fn drag(
         &mut self,
         start: (i32, i32),
         end: (i32, i32),
         button: PointerButton,
-    ) -> Result<()> {
+    ) -> Result<DragLanding> {
         let code = button.key_code();
-        // Drag currently reports backend success only; retain the landing
-        // values explicitly so their intentional omission stays visible.
-        let _start_landing = self.move_to(start.0, start.1)?;
+        let start_landing = self.move_to(start.0, start.1)?;
         sleep(Duration::from_millis(30));
         self.device
             .emit(&[InputEvent::new_now(EventType::KEY.0, code, 1)])?;
         sleep(Duration::from_millis(40));
-        let _end_landing = self.move_to(end.0, end.1)?;
+        let end_landing = self.geometry.landing_for(end.0, end.1);
+        let steps = drag_step_count(start_landing.emitted, end_landing.emitted);
+        for step in 1..=steps {
+            let (step_x, step_y) =
+                drag_point_at(start_landing.emitted, end_landing.emitted, step, steps);
+            self.emit_absolute(step_x, step_y)?;
+            sleep(DRAG_STEP_PAUSE);
+        }
         sleep(Duration::from_millis(40));
         self.device
             .emit(&[InputEvent::new_now(EventType::KEY.0, code, 0)])?;
-        Ok(())
+        Ok(DragLanding {
+            start: start_landing,
+            end: end_landing,
+            steps,
+        })
     }
+}
+
+/// Where both ends of a drag landed, and how many moves carried the pointer
+/// between them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use = "drag input may be clamped; inspect requested and emitted coordinates"]
+pub(crate) struct DragLanding {
+    pub(crate) start: PointerLanding,
+    pub(crate) end: PointerLanding,
+    pub(crate) steps: u32,
+}
+
+/// Desktop pixels per drag step, and the ceiling on how many steps one drag
+/// spends: a long drag stays under `DRAG_MAX_STEPS * DRAG_STEP_PAUSE`.
+const DRAG_STEP_PIXELS: i32 = 8;
+const DRAG_MAX_STEPS: u32 = 40;
+const DRAG_STEP_PAUSE: Duration = Duration::from_millis(10);
+
+/// How many moves a drag from `start` to `end` is split into: one per
+/// `DRAG_STEP_PIXELS` along its longer axis, at least one and at most
+/// `DRAG_MAX_STEPS`.
+fn drag_step_count(start: (i32, i32), end: (i32, i32)) -> u32 {
+    let distance = (i64::from(end.0) - i64::from(start.0))
+        .unsigned_abs()
+        .max((i64::from(end.1) - i64::from(start.1)).unsigned_abs());
+    let steps = distance.div_ceil(DRAG_STEP_PIXELS.unsigned_abs().into());
+    u32::try_from(steps)
+        .unwrap_or(DRAG_MAX_STEPS)
+        .clamp(1, DRAG_MAX_STEPS)
+}
+
+/// The point `step` of `steps` along the way from `start` to `end`. The last
+/// step is `end` itself, so a drag always releases where it was asked to.
+fn drag_point_at(start: (i32, i32), end: (i32, i32), step: u32, steps: u32) -> (i32, i32) {
+    if step >= steps {
+        return end;
+    }
+    let along = |from: i32, to: i32| {
+        let traveled =
+            (i64::from(to) - i64::from(from)) * i64::from(step) / i64::from(steps.max(1));
+        i32::try_from(i64::from(from) + traveled).unwrap_or(to)
+    };
+    (along(start.0, end.0), along(start.1, end.1))
 }
 
 /// Pointer buttons we can synthesize.
@@ -226,7 +285,10 @@ impl PointerButton {
 
 #[cfg(test)]
 mod tests {
-    use super::{AbsPointerGeometry, PointerButton};
+    use super::{
+        AbsPointerGeometry, DRAG_MAX_STEPS, DRAG_STEP_PIXELS, PointerButton, drag_point_at,
+        drag_step_count,
+    };
 
     #[test]
     fn axis_range_ends_at_last_desktop_pixel() {
@@ -271,6 +333,49 @@ mod tests {
         let geometry = AbsPointerGeometry::from_dimensions(1, 1);
 
         assert_eq!(geometry.neighbor_of(0, 0), None);
+    }
+
+    #[test]
+    fn a_drag_takes_one_step_per_eight_pixels_of_its_longer_axis() {
+        assert_eq!(drag_step_count((100, 100), (100, 100)), 1);
+        assert_eq!(drag_step_count((100, 100), (104, 100)), 1);
+        assert_eq!(
+            drag_step_count((100, 100), (100 + DRAG_STEP_PIXELS * 10, 140)),
+            10
+        );
+        assert_eq!(drag_step_count((0, 0), (0, -80)), 10);
+    }
+
+    #[test]
+    fn a_long_drag_stays_within_the_step_ceiling() {
+        assert_eq!(drag_step_count((0, 0), (10_000, 0)), DRAG_MAX_STEPS);
+        assert_eq!(
+            drag_step_count((i32::MIN, 0), (i32::MAX, 0)),
+            DRAG_MAX_STEPS
+        );
+    }
+
+    #[test]
+    fn a_drag_walks_from_its_start_to_exactly_its_end() {
+        let (start, end) = ((300, 16), (420, 96));
+        let steps = drag_step_count(start, end);
+        assert!(steps > 1, "a 120-pixel drag is more than one jump");
+
+        let points = (1..=steps)
+            .map(|step| drag_point_at(start, end, step, steps))
+            .collect::<Vec<_>>();
+
+        assert_eq!(*points.last().expect("at least one step"), end);
+        assert!(points.iter().all(|point| {
+            (start.0..=end.0).contains(&point.0) && (start.1..=end.1).contains(&point.1)
+        }));
+        for pair in points.windows(2) {
+            assert!(
+                (pair[1].0 - pair[0].0).abs() <= DRAG_STEP_PIXELS
+                    && (pair[1].1 - pair[0].1).abs() <= DRAG_STEP_PIXELS,
+                "no step jumps further than {DRAG_STEP_PIXELS} pixels: {pair:?}"
+            );
+        }
     }
 
     #[test]

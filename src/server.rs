@@ -1419,7 +1419,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "drag",
-        description = "Drag from one point to another. Each end is either a desktop coordinate pair, a window-relative pair (with a window target and `relative: true`), or the center of an element (`start_element_index`/`end_element_index` from the latest get_app_state tree). A window target is raised and focused first, so the drag lands on the intended app rather than whatever is stacked on top at that pixel. The result reports the desktop point each end resolved to.",
+        description = "Drag from one point to another. Each end is either a desktop coordinate pair, a window-relative pair (with a window target and `relative: true`), or the center of an element (`start_element_index`/`end_element_index` from the latest get_app_state tree). A window target is raised and focused first, so the drag lands on the intended app rather than whatever is stacked on top at that pixel. The pointer travels in small steps between the two ends rather than jumping, so a component that reacts to the first movement under it -- a title bar handing its window to the compositor, a list reordering itself -- sees the drag. The result reports the desktop point each end resolved to and how many steps carried the pointer between them.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1595,26 +1595,36 @@ impl ComputerUseLinux {
         if self.ensure_abs_pointer().await {
             let abs_pointer = Arc::clone(&self.abs_pointer);
             let dragged = tokio::task::spawn_blocking(move || {
-                if let Ok(mut guard) = abs_pointer.lock() {
-                    guard.as_mut().map(|p| {
-                        p.drag(start, end, crate::abs_pointer::PointerButton::Left)
-                            .is_ok()
-                    })
-                } else {
-                    None
-                }
+                let mut guard = abs_pointer.lock().ok()?;
+                let pointer = guard.as_mut()?;
+                pointer
+                    .drag(start, end, crate::abs_pointer::PointerButton::Left)
+                    .ok()
             })
             .await
             .ok()
             .flatten();
-            if dragged == Some(true) {
-                return Json(ActionOutput {
-                    ok: true,
-                    implemented: true,
-                    action: "drag".to_string(),
-                    message: "Action sent through the uinput absolute pointer.".to_string(),
-                    received,
-                });
+            if let Some(landing) = dragged {
+                let (start_x, start_y) = landing.start.emitted;
+                let (end_x, end_y) = landing.end.emitted;
+                let steps = landing.steps;
+                let mut notes = abs_pointer_clamp_note(landing.start)
+                    .into_iter()
+                    .chain(abs_pointer_clamp_note(landing.end))
+                    .collect::<Vec<_>>();
+                notes.extend(self.pointer_landing_note(landing.end.emitted).await);
+                return Json(with_notes(
+                    ActionOutput {
+                        ok: true,
+                        implemented: true,
+                        action: "drag".to_string(),
+                        message: format!(
+                            "Action sent through the uinput absolute pointer: pressed at ({start_x}, {start_y}), moved to ({end_x}, {end_y}) in {steps} steps, released there."
+                        ),
+                        received,
+                    },
+                    notes,
+                ));
             }
         }
         let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
