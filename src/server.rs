@@ -85,6 +85,46 @@ pub struct ComputerUseLinux {
     /// Cached physical desktop size from the most recent full-frame capture,
     /// used for off-screen warnings.
     desktop_size: Arc<Mutex<Option<(u32, u32)>>>,
+    /// The element index every `object_ref` read so far was given.
+    element_indices: Arc<Mutex<StableElementIndices>>,
+}
+
+/// The element index each `object_ref` was minted with, so an index outlives
+/// the re-read of the tree that produced it.
+///
+/// A positional index is only true of the one snapshot it came from: the next
+/// read renumbers every node, and an index taken from the read before it then
+/// names a different element without erroring — the click lands on whatever
+/// now sits in that position. Keyed by `object_ref`, which survives a re-read
+/// and dies with the process that owns it, an index names the same element
+/// until that element is gone, and names nothing once it is.
+#[derive(Debug, Default)]
+struct StableElementIndices {
+    assigned: std::collections::HashMap<String, u32>,
+    next: u32,
+}
+
+impl StableElementIndices {
+    /// How many elements are remembered before the map is dropped whole. A
+    /// desktop session reads far fewer than this; the cap is what keeps a
+    /// server that runs for days from growing without bound.
+    const MAX_TRACKED: usize = 20_000;
+
+    /// The index for `object_ref`: the one it already has, or the next unused
+    /// number. Numbers are not recycled while they are remembered, so a stale
+    /// index fails to resolve rather than resolving to another element.
+    fn index_for(&mut self, object_ref: &str) -> u32 {
+        if let Some(index) = self.assigned.get(object_ref) {
+            return *index;
+        }
+        if self.assigned.len() >= Self::MAX_TRACKED || self.next == u32::MAX {
+            self.assigned.clear();
+        }
+        let index = self.next;
+        self.next = self.next.wrapping_add(1);
+        self.assigned.insert(object_ref.to_string(), index);
+        index
+    }
 }
 
 fn sanitize_unsigned_integer_formats(value: &mut serde_json::Value) {
@@ -349,12 +389,9 @@ impl ComputerUseLinux {
                 match snapshot_tree(app_filter.as_deref(), target_pid, max_nodes, max_depth).await {
                     Ok(snapshot) => {
                         let raw_count = snapshot.nodes.len();
-                        (
-                            compact_accessibility_tree(snapshot.nodes),
-                            raw_count,
-                            snapshot.root_pids,
-                            None,
-                        )
+                        let mut nodes = compact_accessibility_tree(snapshot.nodes);
+                        self.apply_stable_indices(&mut nodes);
+                        (nodes, raw_count, snapshot.root_pids, None)
                     }
                     Err(error) => (Vec::new(), 0, Vec::new(), Some(format!("{error:#}"))),
                 }
@@ -3318,7 +3355,8 @@ impl ComputerUseLinux {
                 }
             };
             let raw_count = snapshot.nodes.len();
-            let nodes = compact_accessibility_tree(snapshot.nodes);
+            let mut nodes = compact_accessibility_tree(snapshot.nodes);
+            self.apply_stable_indices(&mut nodes);
             let matches = nodes
                 .iter()
                 .filter(|node| node_matches_selector(node, selector))
@@ -3734,6 +3772,27 @@ impl ComputerUseLinux {
             .unwrap_or_default()
     }
 
+    /// Renumber a freshly compacted tree so every node keeps the index it was
+    /// given the last time it was read, and `parent_index` follows.
+    fn apply_stable_indices(&self, nodes: &mut [AccessibilityNode]) {
+        let Ok(mut indices) = self.element_indices.lock() else {
+            return;
+        };
+        let assigned = nodes
+            .iter()
+            .map(|node| indices.index_for(&node.object_ref))
+            .collect::<Vec<_>>();
+        for (node, index) in nodes.iter_mut().zip(&assigned) {
+            // Read before the write: `parent_index` still holds the position
+            // the compaction gave it, which is this node's index into
+            // `assigned`.
+            node.parent_index = node
+                .parent_index
+                .and_then(|parent| assigned.get(parent as usize).copied());
+            node.index = *index;
+        }
+    }
+
     #[cfg(test)]
     fn cache_nodes(&self, nodes: &[AccessibilityNode]) {
         self.cache_tree(nodes, None);
@@ -3968,7 +4027,7 @@ impl ComputerUseLinux {
                 .cloned()
                 .ok_or_else(|| {
                     format!(
-                        "No cached accessibility node for element_index {element_index}. Call get_app_state first."
+                        "No element_index {element_index} in the tree as it was last read. An index names the same element until that element goes away, so this one is gone: the view changed, or the application restarted. Call get_app_state or wait_for and read the index again."
                     )
                 });
         }
@@ -5703,6 +5762,70 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    /// A node identified by its `object_ref` rather than its position, which
+    /// is what the stable-index tests are about.
+    fn node_with_ref(object_ref: &str, parent_index: Option<u32>) -> AccessibilityNode {
+        AccessibilityNode {
+            object_ref: object_ref.to_string(),
+            parent_index,
+            ..node(0, None)
+        }
+    }
+
+    #[test]
+    fn an_element_index_survives_a_re_read_of_the_tree() {
+        let backend = ComputerUseLinux::default();
+        let mut first = vec![
+            node_with_ref("app/frame", None),
+            node_with_ref("app/toolbar", Some(0)),
+            node_with_ref("app/details", Some(1)),
+        ];
+
+        backend.apply_stable_indices(&mut first);
+        let details = first[2].index;
+        assert_eq!(first[2].parent_index, Some(first[1].index));
+
+        // The next read finds a node that was not there before, which would
+        // renumber everything after it if indices were positional.
+        let mut second = vec![
+            node_with_ref("app/frame", None),
+            node_with_ref("app/banner", Some(0)),
+            node_with_ref("app/toolbar", Some(0)),
+            node_with_ref("app/details", Some(2)),
+        ];
+        backend.apply_stable_indices(&mut second);
+
+        assert_eq!(second[3].index, details);
+        assert_eq!(second[3].parent_index, Some(second[2].index));
+        assert_ne!(second[1].index, details);
+    }
+
+    #[test]
+    fn an_index_whose_element_is_gone_is_not_handed_to_another_one() {
+        let backend = ComputerUseLinux::default();
+        let mut first = vec![node_with_ref("app/details", None)];
+        backend.apply_stable_indices(&mut first);
+        let details = first[0].index;
+
+        let mut second = vec![node_with_ref("app/status-bar", None)];
+        backend.apply_stable_indices(&mut second);
+
+        assert_ne!(second[0].index, details);
+        backend.cache_tree(&second, None);
+        let error = backend
+            .resolve_cached_node(
+                Some(details),
+                None,
+                &ElementSelector::default(),
+                ElementResolvePurpose::Click,
+            )
+            .expect_err("an index whose element is gone must not resolve");
+        assert!(
+            error.contains(&format!("element_index {details}")),
+            "{error}"
+        );
     }
 
     fn node(index: u32, bounds: Option<Bounds>) -> AccessibilityNode {
