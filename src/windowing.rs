@@ -50,6 +50,7 @@ mod tests {
                 height: 600,
             }),
             workspace: None,
+            floating: None,
             focused: false,
             hidden: false,
             client_type: Some("wayland".to_string()),
@@ -404,6 +405,7 @@ mod tests {
             "class": "brave-browser",
             "title": "Repo - Brave",
             "pid": 24134,
+            "floating": false,
             "xwayland": false,
             "focusHistoryID": 1
           },
@@ -417,6 +419,7 @@ mod tests {
             "class": "codex-desktop",
             "title": "Codex",
             "pid": 68986,
+            "floating": true,
             "xwayland": false,
             "focusHistoryID": 0
           },
@@ -446,6 +449,11 @@ mod tests {
         assert_eq!(windows[0].bounds.as_ref().unwrap().x, Some(10));
         assert_eq!(windows[0].bounds.as_ref().unwrap().height, 1022);
         assert_eq!(windows[0].workspace, Some(2));
+        // move_window and resize_window refuse a tiled window, so a caller
+        // can see which one it is holding before it asks.
+        assert_eq!(windows[0].floating, Some(false));
+        assert_eq!(windows[1].floating, Some(true));
+        assert_eq!(windows[2].floating, None);
         assert!(!windows[0].focused);
         assert_eq!(windows[0].client_type.as_deref(), Some("wayland"));
         assert_eq!(windows[0].backend, HYPRLAND_BACKEND);

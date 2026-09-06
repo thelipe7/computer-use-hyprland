@@ -900,6 +900,7 @@ impl TryFrom<HyprlandClient> for WindowInfo {
             pid: client.pid.and_then(|pid| u32::try_from(pid).ok()),
             bounds,
             workspace: client.workspace.and_then(|workspace| workspace.id),
+            floating: client.floating,
             focused: client.focus_history_id == Some(0),
             hidden: client.hidden.unwrap_or(false),
             client_type,

@@ -352,6 +352,7 @@ mod tests {
                 height: 600,
             }),
             workspace: Some(0),
+            floating: None,
             focused: false,
             hidden: false,
             client_type: Some("wayland".to_string()),

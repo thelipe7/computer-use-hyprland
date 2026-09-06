@@ -12,6 +12,9 @@ pub struct WindowInfo {
     pub pid: Option<u32>,
     pub bounds: Option<WindowBounds>,
     pub workspace: Option<i32>,
+    /// Whether Hyprland floats this window. `move_window` and `resize_window`
+    /// refuse a tiled one, so this is how a caller knows before it asks.
+    pub floating: Option<bool>,
     pub focused: bool,
     pub hidden: bool,
     pub client_type: Option<String>,
