@@ -128,12 +128,12 @@ from an input-backend one.
 
 **Setup** — `setup_accessibility`, for when `doctor` says AT-SPI is off.
 
-`run_shell` is registered only when `COMPUTER_USE_HYPRLAND_ENABLE_SHELL=1`.
-
 ### Two things that are easy to get wrong
 
-**Element indices die when the application restarts.** Call `get_app_state` or
-`wait_for` again before using an index against a relaunched process.
+**Element indices die with their element.** An index keeps naming the same
+element across re-reads of the tree and stops resolving once that element is
+gone, so a stale one errors instead of acting on whatever took its place; call
+`get_app_state` or `wait_for` again after a relaunch.
 
 **Hyprland cannot give a tiled window an exact geometry.** `move_window` and
 `resize_window` refuse one without dispatching anything: a pixel move is
@@ -145,7 +145,6 @@ resize, then `floating: false` to put the layout back.
 
 | Variable | Effect |
 |---|---|
-| `COMPUTER_USE_HYPRLAND_ENABLE_SHELL=1` | Registers `run_shell`. Off by default; the command is not sandboxed. |
 | `COMPUTER_USE_HYPRLAND_ALLOWED_APPS` | Comma-separated `app_id`/`wm_class`/`title` patterns. Input tools refuse a window matching none of them. |
 | `COMPUTER_USE_HYPRLAND_FORCE_YDOTOOL_KEYBOARD=1` | Skips `wtype` and sends literal text through ydotool. |
 | `COMPUTER_USE_HYPRLAND_DISABLE_ABS_POINTER=1` | Skips the uinput absolute pointer, leaving ydotool for the pointer too. |

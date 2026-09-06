@@ -101,9 +101,9 @@ TOML at the edges: the lint policy, the profiles, the dependency policy.
 survives every other check.
 
 The last line is the contract check. It spawns the binary, does the MCP
-handshake and asserts the exact tool set, that `run_shell` stays opt-in, that
-every window-targeted tool exposes the same nine selectors, and that the
-exported JSON schemas are well-formed. Add a tool and its name goes in
+handshake and asserts the exact tool set, that no tool takes a raw
+process-control parameter, that every window-targeted tool exposes the same
+nine selectors, and that the exported JSON schemas are well-formed. Add a tool and its name goes in
 `EXPECTED_TOOLS`; that is the point, not an obstacle.
 
 ### What CI cannot check
