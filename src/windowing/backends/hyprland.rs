@@ -281,26 +281,9 @@ fn windows_from_hyprland_clients(clients: Vec<HyprlandClient>) -> Result<Vec<Win
 
 pub async fn activate_window(window_id: u64) -> Result<()> {
     let address = format!("address:0x{window_id:x}");
-    let lua_dispatch = lua_focus_dispatch(&address);
-    let lua_output = hyprctl_output_async(&["dispatch", &lua_dispatch])
+    run_lua_dispatch(&lua_focus_dispatch(&address))
         .await
-        .with_context(|| format!("failed to run Hyprland Lua focus dispatcher for {address}"))?;
-    if dispatch_succeeded(&lua_output) {
-        return Ok(());
-    }
-
-    let legacy_output = hyprctl_output_async(&["dispatch", "focuswindow", &address])
-        .await
-        .with_context(|| format!("failed to run hyprctl dispatch focuswindow {address}"))?;
-    if dispatch_succeeded(&legacy_output) {
-        Ok(())
-    } else {
-        bail!(
-            "Hyprland window focus failed for {address}; Lua dispatcher: {}; legacy dispatcher: {}",
-            command_detail(&lua_output),
-            command_detail(&legacy_output)
-        );
-    }
+        .with_context(|| format!("Hyprland window focus failed for {address}"))
 }
 
 /// True when this process runs inside a Hyprland session it can reach.
@@ -414,17 +397,13 @@ pub async fn move_window(window_id: u64, x: i32, y: i32) -> Result<String> {
         None => [x, y],
     };
     refuse_if_tiled(window_id, &query_client(window_id).await?, "move")?;
-    let dispatcher = run_dispatch_with_fallback(
-        &lua_move_dispatch(window_id, target),
-        &move_window_dispatch(window_id, target),
-    )
-    .await?;
+    run_lua_dispatch(&lua_move_dispatch(window_id, target)).await?;
     let after = wait_for_client(window_id, |client| client.at == Some(target)).await?;
     if after.at == Some(target) {
-        return Ok(format!("Moved window to ({x}, {y}) via {dispatcher}."));
+        return Ok(format!("Moved window to ({x}, {y})."));
     }
     Ok(format!(
-        "Requested move to ({x}, {y}) via {dispatcher}; Hyprland reported global position {}.",
+        "Requested move to ({x}, {y}); Hyprland reported global position {}.",
         describe_pair(after.at.map(|[x, y]| (i64::from(x), i64::from(y))))
     ))
 }
@@ -442,22 +421,16 @@ pub async fn resize_window(window_id: u64, width: i32, height: i32) -> Result<St
         target[1].max(1).cast_unsigned(),
     ];
     refuse_if_tiled(window_id, &query_client(window_id).await?, "resize")?;
-    let dispatcher = run_dispatch_with_fallback(
-        &lua_resize_dispatch(window_id, target),
-        &resize_window_dispatch(window_id, target),
-    )
-    .await?;
+    run_lua_dispatch(&lua_resize_dispatch(window_id, target)).await?;
     // An exact resize re-centers the window, so `at` changes too; the caller
     // sees the fresh geometry through the re-query, and only the size decides
     // whether the request landed.
     let after = wait_for_client(window_id, |client| client.size == Some(target_size)).await?;
     if after.size == Some(target_size) {
-        return Ok(format!(
-            "Resized window to {width}x{height} via {dispatcher}."
-        ));
+        return Ok(format!("Resized window to {width}x{height}."));
     }
     Ok(format!(
-        "Requested resize to {width}x{height} via {dispatcher}; Hyprland reported global size {}.",
+        "Requested resize to {width}x{height}; Hyprland reported global size {}.",
         describe_pair(after.size.map(|[w, h]| (i64::from(w), i64::from(h))))
     ))
 }
@@ -466,11 +439,12 @@ fn window_address(window_id: u64) -> String {
     format!("address:0x{window_id:x}")
 }
 
-/// Hyprland 0.55+ with a Lua config wraps every `hyprctl dispatch` argument
-/// as `return hl.dispatch(<arg>)`, so the legacy `movewindowpixel` syntax is
-/// rejected there ("')' expected near 'exact'") and the Lua table form is the
-/// one that works. Coordinates are Hyprland's global layout coordinates, the
-/// ones `hyprctl clients -j` reports in `at`.
+/// Hyprland 0.55+ wraps every `hyprctl dispatch` argument as
+/// `return hl.dispatch(<arg>)`, so the string dispatchers that came before it
+/// are rejected as Lua ("')' expected near 'exact'") and the table form is the
+/// only one that works -- over the raw IPC socket too, not just the CLI.
+/// Coordinates are Hyprland's global layout coordinates, the ones
+/// `hyprctl clients -j` reports in `at`.
 fn lua_move_dispatch(window_id: u64, [x, y]: [i32; 2]) -> String {
     format!(
         "hl.dsp.window.move({{ window = \"{}\", exact = true, x = {x}, y = {y} }})",
@@ -494,21 +468,15 @@ pub async fn set_floating(window_id: u64, floating: bool) -> Result<String> {
     if query_client(window_id).await?.floating == Some(floating) {
         return Ok(format!("Window 0x{window_id:x} is already {state}."));
     }
-    let dispatcher = run_dispatch_with_fallback(
-        &lua_float_dispatch(window_id, floating),
-        &float_window_dispatch(window_id, floating),
-    )
-    .await?;
+    run_lua_dispatch(&lua_float_dispatch(window_id, floating)).await?;
     let after = wait_for_client(window_id, |client| client.floating == Some(floating)).await?;
     if after.floating != Some(floating) {
         bail!(
-            "Requested {state} for window 0x{window_id:x} via {dispatcher}, but Hyprland still reports it {}.",
+            "Requested {state} for window 0x{window_id:x}, but Hyprland still reports it {}.",
             describe_floating(!floating)
         );
     }
-    Ok(format!(
-        "Window 0x{window_id:x} is now {state} via {dispatcher}."
-    ))
+    Ok(format!("Window 0x{window_id:x} is now {state}."))
 }
 
 fn describe_floating(floating: bool) -> &'static str {
@@ -523,37 +491,6 @@ fn lua_float_dispatch(window_id: u64, floating: bool) -> String {
         window_address(window_id),
         if floating { "set" } else { "unset" }
     )
-}
-
-/// `hyprctl dispatch setfloating|settiled address:0x<hex>`, the pre-0.55 form
-/// kept as the fallback.
-fn float_window_dispatch(window_id: u64, floating: bool) -> [String; 3] {
-    [
-        "dispatch".to_string(),
-        if floating { "setfloating" } else { "settiled" }.to_string(),
-        window_address(window_id),
-    ]
-}
-
-/// `hyprctl dispatch movewindowpixel exact <x> <y>,address:0x<hex>`, the
-/// pre-0.55 form kept as the fallback.
-fn move_window_dispatch(window_id: u64, [x, y]: [i32; 2]) -> [String; 3] {
-    [
-        "dispatch".to_string(),
-        "movewindowpixel".to_string(),
-        format!("exact {x} {y},{}", window_address(window_id)),
-    ]
-}
-
-/// `hyprctl dispatch resizewindowpixel exact <w> <h>,address:0x<hex>`, the
-/// pre-0.55 form kept as the fallback; the size is in Hyprland's global
-/// layout units, the ones `size` reports.
-fn resize_window_dispatch(window_id: u64, [width, height]: [i32; 2]) -> [String; 3] {
-    [
-        "dispatch".to_string(),
-        "resizewindowpixel".to_string(),
-        format!("exact {width} {height},{}", window_address(window_id)),
-    ]
 }
 
 /// Hyprland cannot give a tiled window an exact geometry: it drops a pixel
@@ -579,30 +516,22 @@ fn describe_pair(pair: Option<(i64, i64)>) -> String {
     }
 }
 
-/// Run the Lua dispatcher first and the legacy one when it is rejected, the
-/// way `activate_window` does; returns which one Hyprland accepted.
-async fn run_dispatch_with_fallback(
-    lua_dispatch: &str,
-    legacy: &[String; 3],
-) -> Result<&'static str> {
-    let lua_output = hyprctl_output_async(&["dispatch", lua_dispatch])
+/// Run one Lua dispatcher and answer with Hyprland's own words when it is
+/// rejected.
+///
+/// A rejected dispatch still exits zero and prints its complaint on stdout,
+/// which is why success is "the output is exactly ok" rather than the exit
+/// status.
+async fn run_lua_dispatch(lua_dispatch: &str) -> Result<()> {
+    let output = hyprctl_output_async(&["dispatch", lua_dispatch])
         .await
         .with_context(|| format!("failed to run hyprctl dispatch {lua_dispatch}"))?;
-    if dispatch_succeeded(&lua_output) {
-        return Ok("hyprctl dispatch hl.dsp.window (Lua)");
-    }
-    let legacy_args = [legacy[0].as_str(), legacy[1].as_str(), legacy[2].as_str()];
-    let legacy_output = hyprctl_output_async(&legacy_args)
-        .await
-        .with_context(|| format!("failed to run hyprctl {}", legacy_args.join(" ")))?;
-    if dispatch_succeeded(&legacy_output) {
-        return Ok("hyprctl dispatch (legacy)");
+    if dispatch_succeeded(&output) {
+        return Ok(());
     }
     bail!(
-        "hyprctl dispatch failed for {}; Lua dispatcher: {}; legacy dispatcher: {}",
-        legacy_args[2],
-        command_detail(&lua_output),
-        command_detail(&legacy_output)
+        "hyprctl dispatch {lua_dispatch} failed: {}",
+        command_detail(&output)
     );
 }
 
@@ -1018,34 +947,6 @@ mod tests {
     }
 
     #[test]
-    fn formats_movewindowpixel_and_resizewindowpixel_dispatches() {
-        assert_eq!(
-            move_window_dispatch(0x1234abcd, [965, 48]),
-            [
-                "dispatch".to_string(),
-                "movewindowpixel".to_string(),
-                "exact 965 48,address:0x1234abcd".to_string(),
-            ]
-        );
-        assert_eq!(
-            move_window_dispatch(0x1234abcd, [-10, 0]),
-            [
-                "dispatch".to_string(),
-                "movewindowpixel".to_string(),
-                "exact -10 0,address:0x1234abcd".to_string(),
-            ]
-        );
-        assert_eq!(
-            resize_window_dispatch(0xff, [900, 700]),
-            [
-                "dispatch".to_string(),
-                "resizewindowpixel".to_string(),
-                "exact 900 700,address:0xff".to_string(),
-            ]
-        );
-    }
-
-    #[test]
     fn formats_lua_window_dispatches() {
         assert_eq!(
             lua_move_dispatch(0x555c37cb3770, [1000, 100]),
@@ -1063,26 +964,10 @@ mod tests {
             lua_float_dispatch(0x555c37cb3770, false),
             "hl.dsp.window.float({ window = \"address:0x555c37cb3770\", action = \"unset\" })"
         );
-        assert_eq!(
-            float_window_dispatch(0x1234abcd, true),
-            [
-                "dispatch".to_string(),
-                "setfloating".to_string(),
-                "address:0x1234abcd".to_string(),
-            ]
-        );
-        assert_eq!(
-            float_window_dispatch(0x1234abcd, false),
-            [
-                "dispatch".to_string(),
-                "settiled".to_string(),
-                "address:0x1234abcd".to_string(),
-            ]
-        );
     }
 
     #[test]
-    fn lua_config_rejections_of_the_legacy_syntax_are_not_successes() {
+    fn a_rejected_lua_dispatch_is_not_a_success() {
         for stdout in [
             "error: ')' expected near 'exact' (dispatch in lua is a shorthand for hl.dispatch(...))\n",
             "hl.dsp.window.move: expected a table, e.g. { direction = \"left\" }\n",
