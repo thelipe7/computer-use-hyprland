@@ -304,6 +304,76 @@ pub async fn active_workspace() -> Result<WorkspaceSummary> {
         .context("failed to parse hyprctl activeworkspace -j output")
 }
 
+/// What Hyprland should do with the window a spawned program opens.
+///
+/// These are window rules applied at map time, which is the only moment they
+/// can be applied: a window that opens tiled has already been sized by the
+/// layout, and floating it afterwards gives it a size Hyprland remembers
+/// rather than the one the program asked for.
+#[derive(Debug, Clone, Copy)]
+pub struct LaunchRules {
+    pub float: bool,
+    pub workspace: Option<WorkspaceTarget>,
+    pub size: Option<(i32, i32)>,
+}
+
+/// Spawn a program through Hyprland so its first window opens under `rules`.
+/// Answers with the command line the compositor was given.
+///
+/// The compositor runs the command through `sh -c`, so every word is quoted
+/// here and the caller never writes shell: a program name and its arguments
+/// go in, one shell word each comes out.
+pub async fn launch(program: &str, args: &[String], rules: LaunchRules) -> Result<String> {
+    let program = program.trim();
+    if program.is_empty() {
+        bail!("launch needs a program to run.");
+    }
+    let command = shell_command(program, args);
+    run_lua_dispatch(&format!(
+        "hl.dsp.exec_cmd({}, {})",
+        lua_string(&command),
+        lua_rules_table(rules)
+    ))
+    .await?;
+    Ok(command)
+}
+
+/// The command line, with every word quoted for `sh -c`.
+fn shell_command(program: &str, args: &[String]) -> String {
+    std::iter::once(program)
+        .chain(args.iter().map(String::as_str))
+        .map(shell_word)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// One shell word: single-quoted, with embedded single quotes closed,
+/// escaped and reopened. Nothing inside survives as syntax.
+fn shell_word(word: &str) -> String {
+    format!("'{}'", word.replace('\'', "'\\''"))
+}
+
+/// A Lua double-quoted string literal for `value`.
+fn lua_string(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n");
+    format!("\"{escaped}\"")
+}
+
+/// The window-rule table for `exec_cmd`.
+fn lua_rules_table(rules: LaunchRules) -> String {
+    let mut fields = vec![format!("float = {}", rules.float)];
+    if let Some(workspace) = rules.workspace {
+        fields.push(format!("workspace = {}", workspace.lua_value()));
+    }
+    if let Some((width, height)) = rules.size {
+        fields.push(format!("size = {{{width}, {height}}}"));
+    }
+    format!("{{ {} }}", fields.join(", "))
+}
+
 /// Move the view to another workspace, reporting where it was so a caller can
 /// put it back.
 pub async fn focus_workspace(target: WorkspaceTarget) -> Result<WorkspaceChange> {
@@ -1089,6 +1159,53 @@ mod tests {
             "title": "Sophia"
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn a_launch_command_is_quoted_word_by_word() {
+        assert_eq!(shell_word("wev"), "'wev'");
+        // Nothing inside an argument survives as shell syntax.
+        assert_eq!(shell_word("rm -rf ~; echo $HOME"), "'rm -rf ~; echo $HOME'");
+        assert_eq!(shell_word("it's"), r"'it'\''s'");
+        assert_eq!(
+            shell_command("my app", &["--flag".to_string(), "a b".to_string()]),
+            "'my app' '--flag' 'a b'"
+        );
+    }
+
+    #[test]
+    fn a_launch_command_is_a_lua_string_literal() {
+        assert_eq!(lua_string("'wev'"), "\"'wev'\"");
+        assert_eq!(lua_string(r#"say "hi""#), r#""say \"hi\"""#);
+        assert_eq!(lua_string(r"back\slash"), r#""back\\slash""#);
+    }
+
+    #[test]
+    fn launch_rules_carry_only_what_was_asked_for() {
+        assert_eq!(
+            lua_rules_table(LaunchRules {
+                float: true,
+                workspace: Some(WorkspaceTarget::FirstEmpty),
+                size: None,
+            }),
+            "{ float = true, workspace = \"empty\" }"
+        );
+        assert_eq!(
+            lua_rules_table(LaunchRules {
+                float: false,
+                workspace: Some(WorkspaceTarget::Id(3)),
+                size: Some((1280, 800)),
+            }),
+            "{ float = false, workspace = 3, size = {1280, 800} }"
+        );
+        assert_eq!(
+            lua_rules_table(LaunchRules {
+                float: true,
+                workspace: None,
+                size: None,
+            }),
+            "{ float = true }"
+        );
     }
 
     #[test]

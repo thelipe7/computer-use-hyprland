@@ -26,6 +26,7 @@ EXPECTED_TOOLS = {
     "pointer_position",
     "activate_window",
     "focus_workspace",
+    "launch_app",
     "move_window_to_workspace",
     "move_window",
     "resize_window",

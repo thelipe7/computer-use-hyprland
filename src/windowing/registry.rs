@@ -4,7 +4,7 @@ use crate::windowing::types::{
 };
 use anyhow::{Result, anyhow};
 
-pub use hyprland::{HYPRLAND_BACKEND, HyprlandRelease, MINIMUM_HYPRLAND_RELEASE};
+pub use hyprland::{HYPRLAND_BACKEND, HyprlandRelease, LaunchRules, MINIMUM_HYPRLAND_RELEASE};
 
 /// The running Hyprland release, or `None` when it cannot be read.
 pub fn hyprland_release() -> Option<HyprlandRelease> {
@@ -51,6 +51,12 @@ pub async fn focused_window() -> Result<Option<WindowInfo>> {
 /// Move the view to another workspace, reporting the one it left.
 pub async fn focus_workspace(target: WorkspaceTarget) -> Result<WorkspaceChange> {
     hyprland::focus_workspace(target).await
+}
+
+/// Spawn a program so its first window opens under `rules`, answering with
+/// the command line the compositor was given.
+pub async fn launch(program: &str, args: &[String], rules: LaunchRules) -> Result<String> {
+    hyprland::launch(program, args, rules).await
 }
 
 /// Move one window to another workspace, taking the view with it when

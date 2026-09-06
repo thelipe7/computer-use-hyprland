@@ -3,7 +3,7 @@ pub mod registry;
 pub mod target;
 pub mod types;
 
-pub use registry::HYPRLAND_BACKEND;
+pub use registry::{HYPRLAND_BACKEND, LaunchRules};
 pub use target::{
     focus_window_target, focused_window, list_windows, resolve_window_target,
     window_permission_hint,

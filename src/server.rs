@@ -13,7 +13,7 @@ use crate::screenshot::{
 };
 use crate::windowing::registry;
 use crate::windowing::{
-    WindowFocusResult, WindowInfo, WindowOcclusion, WindowTarget, WorkspaceSummary,
+    LaunchRules, WindowFocusResult, WindowInfo, WindowOcclusion, WindowTarget, WorkspaceSummary,
     WorkspaceTarget, focus_window_target, focused_window, list_windows, resolve_window_target,
     window_permission_hint,
 };
@@ -55,6 +55,10 @@ const KEY_SEQUENCE_DELAY: Duration = Duration::from_millis(60);
 const POST_ACTION_SETTLE: Duration = Duration::from_millis(120);
 const ALLOWED_APPS_ENV: &str = "COMPUTER_USE_HYPRLAND_ALLOWED_APPS";
 const YDOTOOL_TYPE_CHARS_PER_SECOND: u64 = 20;
+/// How long a launched program has to map its first window, and how often
+/// the window list is read while waiting for it.
+const LAUNCH_WINDOW_TIMEOUT: Duration = Duration::from_secs(10);
+const LAUNCH_WINDOW_POLL: Duration = Duration::from_millis(200);
 /// How far the compositor's pointer position may sit from the point a
 /// pointer action emitted before the result says so. One pixel of slack
 /// absorbs fractional-scaling rounding; anything more is a lost event.
@@ -1893,6 +1897,109 @@ impl ComputerUseLinux {
     }
 
     #[tool(
+        name = "launch_app",
+        description = "Start a program and wait for the window it opens. `program` plus `args` are quoted for the shell the compositor runs them through, so an argument is never read as shell syntax. The window opens under rules applied at the moment it is mapped, which is the only moment they can be applied: floating (default) so it takes the size the program asks for rather than a tile of whatever workspace it landed on, on the first empty workspace (default) so its geometry does not depend on what else was open, and at an exact width/height when those are given. The result carries the window it opened -- window_id, pid, workspace, size -- ready for the other tools. When a rule did not take, the message says so instead of promising: a program whose window comes from a process that was already running (a browser with a window open, an app behind a session daemon) gives the compositor nothing new to apply rules to.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn launch_app(
+        &self,
+        Parameters(params): Parameters<LaunchAppParams>,
+    ) -> Json<LaunchAppOutput> {
+        let received = Some(serde_json::json!(params.clone()));
+        let failure = |message: String, command: Option<String>| {
+            Json(LaunchAppOutput {
+                ok: false,
+                implemented: true,
+                window: None,
+                command,
+                message,
+                received: received.clone(),
+            })
+        };
+        let workspace = match params.workspace.as_deref() {
+            Some(workspace) => match WorkspaceTarget::parse(workspace) {
+                Ok(target) => Some(target),
+                Err(error) => return failure(format!("{error:#}"), None),
+            },
+            None => Some(WorkspaceTarget::FirstEmpty),
+        };
+        let size = match (params.width, params.height) {
+            (Some(width), Some(height)) if width > 0 && height > 0 => Some((width, height)),
+            (None, None) => None,
+            _ => {
+                return failure(
+                    "Pass both width and height, each positive, or neither.".to_string(),
+                    None,
+                );
+            }
+        };
+        let float = params.float.unwrap_or(true);
+        let rules = LaunchRules {
+            float,
+            workspace,
+            size,
+        };
+        let _input_lease = match self.input_gate("launch_app", None).await {
+            Ok(lease) => lease,
+            Err(message) => return failure(message, None),
+        };
+        let before = match list_windows().await {
+            Ok(windows) => windows
+                .into_iter()
+                .map(|window| window.window_id)
+                .collect::<std::collections::HashSet<_>>(),
+            Err(error) => return failure(format!("Window listing failed: {error:#}"), None),
+        };
+        let command = match registry::launch(&params.program, &params.args, rules).await {
+            Ok(command) => command,
+            Err(error) => {
+                return failure(
+                    format!("Could not start {}: {error:#}", params.program),
+                    None,
+                );
+            }
+        };
+        let Some(window) = wait_for_new_window(&before).await else {
+            return failure(
+                format!(
+                    "Ran {command}, but no new window appeared within {} seconds. The program may still be starting, may have exited, or may have handed its window to a process that was already running.",
+                    LAUNCH_WINDOW_TIMEOUT.as_secs()
+                ),
+                Some(command),
+            );
+        };
+        let mut message = format!(
+            "Ran {command}. It opened window_id {} ({:?}) on workspace {}, {} at {}.",
+            window.window_id,
+            window.title.as_deref().unwrap_or(""),
+            describe_workspace_id(window.workspace),
+            if window.floating == Some(true) {
+                "floating"
+            } else {
+                "tiled"
+            },
+            describe_window_size(&window)
+        );
+        for note in launch_rule_notes(&window, rules) {
+            message.push(' ');
+            message.push_str(&note);
+        }
+        Json(LaunchAppOutput {
+            ok: true,
+            implemented: true,
+            window: Some(window),
+            command: Some(command),
+            message,
+            received,
+        })
+    }
+
+    #[tool(
         name = "focus_workspace",
         description = "Show a workspace. `workspace` is a workspace id -- the number list_windows reports for every window -- or \"empty\" for the first workspace with nothing on it, which Hyprland picks. The result names the workspace the view was on before, which is how to put it back when the work is done. Use it to give an application under test a workspace of its own: a window that opens next to another is tiled to share the space, so its geometry depends on whatever else was open, and screenshots and pointer input only reach the visible workspace.",
         annotations(
@@ -2222,6 +2329,39 @@ struct FocusWorkspaceParams {
     /// The workspace to show: an id (the number `list_windows` reports for
     /// each window) or `"empty"` for the first workspace with nothing on it.
     workspace: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct LaunchAppParams {
+    /// The program to start: a name on `PATH`, or a path to an executable.
+    program: String,
+    /// Arguments, one shell word each. They are quoted before the compositor
+    /// runs them, so nothing inside an argument is read as shell syntax.
+    #[serde(default)]
+    args: Vec<String>,
+    /// Where the window opens: a workspace id, or `"empty"` (the default) for
+    /// the first workspace with nothing on it.
+    workspace: Option<String>,
+    /// Open the window floating (default true), the way a window opens on a
+    /// desktop that does not tile: at the size the program asks for.
+    float: Option<bool>,
+    /// Open it at this exact width instead of the size the program asks for.
+    width: Option<i32>,
+    /// Open it at this exact height instead of the size the program asks for.
+    height: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+struct LaunchAppOutput {
+    ok: bool,
+    implemented: bool,
+    /// The window the program opened, once it appeared.
+    window: Option<WindowInfo>,
+    /// The command line the compositor was given, with every word quoted.
+    command: Option<String>,
+    message: String,
+    #[schemars(skip)]
+    received: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -4188,6 +4328,62 @@ fn normalize_text(value: &str) -> String {
 
 /// An element in the terms the tree shows it: its role, and its name when it
 /// has one.
+/// The first window that was not on the desktop before, waited for because a
+/// program takes a moment to map one.
+async fn wait_for_new_window(before: &std::collections::HashSet<u64>) -> Option<WindowInfo> {
+    let deadline = tokio::time::Instant::now() + LAUNCH_WINDOW_TIMEOUT;
+    loop {
+        if let Ok(windows) = list_windows().await
+            && let Some(window) = windows
+                .into_iter()
+                .find(|window| !before.contains(&window.window_id))
+        {
+            return Some(window);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        sleep(LAUNCH_WINDOW_POLL).await;
+    }
+}
+
+fn describe_window_size(window: &WindowInfo) -> String {
+    window.bounds.as_ref().map_or_else(
+        || "an unknown size".to_string(),
+        |bounds| format!("{}x{}", bounds.width, bounds.height),
+    )
+}
+
+/// What the compositor did with the launch rules, when it did not do what was
+/// asked. Silent when every rule took.
+fn launch_rule_notes(window: &WindowInfo, rules: LaunchRules) -> Vec<String> {
+    let mut notes = Vec::new();
+    if rules.float && window.floating == Some(false) {
+        notes.push(
+            "WARNING: it opened tiled rather than floating, so its size is the workspace's tile and not the one the program asks for. Launch rules only reach the window of a process the compositor started, so a program that hands its window to one already running gets none of them.".to_string(),
+        );
+    }
+    if let Some(WorkspaceTarget::Id(requested)) = rules.workspace
+        && window.workspace != Some(requested)
+    {
+        notes.push(format!(
+            "WARNING: it opened on workspace {} rather than the requested {requested}.",
+            describe_workspace_id(window.workspace)
+        ));
+    }
+    if let Some((width, height)) = rules.size
+        && let Some(bounds) = window.bounds.as_ref()
+        && (i64::from(bounds.width), i64::from(bounds.height))
+            != (i64::from(width), i64::from(height))
+    {
+        notes.push(format!(
+            "WARNING: it opened at {}x{} rather than the requested {width}x{height}.",
+            bounds.width, bounds.height
+        ));
+    }
+    notes
+}
+
 /// A workspace id the compositor reported, or a word for one it did not.
 fn describe_workspace_id(workspace: Option<i32>) -> String {
     workspace.map_or_else(|| "unknown".to_string(), |id| id.to_string())
