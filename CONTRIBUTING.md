@@ -116,8 +116,10 @@ cargo install --path .
 ```
 
 Two things make a hand-run confusing if you do not know them. Element indices
-die when the target application restarts, so `get_app_state` or `wait_for` has
-to run again before an index is used against a relaunched process. And only
+are keyed to the AT-SPI identity of the element, so one survives a re-read of
+the tree and dies with the element or its process; against a relaunched
+process the call errors, and `get_app_state` or `wait_for` has to run again.
+And only
 one process at a time may hold the input lock, so a second server answers
 `ok=false` naming the holder's pid rather than fighting it for the pointer.
 The lock frees 30 seconds after the holder's last call

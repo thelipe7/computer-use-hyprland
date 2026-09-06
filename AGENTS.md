@@ -20,12 +20,14 @@ the commit message says what was observed. `cargo install --path .` and then
 restart the MCP client: its server process holds the old binary and does not
 reload it.
 
-Two traps in a hand-run. Element indices die when the target application
-restarts, so `get_app_state` or `wait_for` runs again before an index is used.
-And one process at a time holds the input lock — a second server answers
-`ok=false` naming the holder's pid rather than fighting it for the pointer.
-The lock frees 30 seconds after the holder's last call, so a refusal from a
-session that has gone quiet clears itself on a retry.
+Two traps in a hand-run. Element indices die with their element: an index is
+keyed to the AT-SPI identity, so it survives a re-read of the tree and is gone
+when the element or its process is, and a call that names a dead one errors
+rather than acting on whatever took its place. And one process at a time holds
+the input lock — a second server answers `ok=false` naming the holder's pid
+rather than fighting it for the pointer. The lock frees 30 seconds after the
+holder's last call, so a refusal from a session that has gone quiet clears
+itself on a retry.
 
 ## A tool description is code
 

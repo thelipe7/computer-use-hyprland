@@ -48,6 +48,15 @@ terminal: `tty`, `terminal_pid`, `terminal_command`, `terminal_cwd`.
 `window_id` is exact and comes from `list_windows`; the rest match. Pass none
 and the tool acts on whatever is focused.
 
+**A selector that matches more than one window refuses**, naming each match
+with its `window_id`, title and app, rather than driving one of them. `title`
+narrows in three passes — the exact title, then the title but for letter case,
+then any title containing it — and the first pass with anything in it decides.
+So `title: "Sophia"` reaches the window named exactly that even while an
+editor two workspaces away carries `sophia` in a project title, and a needle
+that only ever appears inside longer titles refuses until `window_id`
+disambiguates it.
+
 **`window_title` is not a tenth selector.** It exists on `wait_for` alone and
 means the predicate: the substring the focused window's title has to contain
 before the wait returns. The selector is always `title`.
@@ -56,13 +65,27 @@ before the wait returns. The selector is always `title`.
 
 In order of how much they promise:
 
-- **`element_index`**, from the most recent `get_app_state` or `wait_for`.
-- **`object_ref` / `element_identifier`**, which survive a re-read of the tree.
+- **`element_index`**, from `get_app_state` or `wait_for`. It is keyed to the
+  element, not to a position in the snapshot, so it survives a re-read and
+  keeps meaning the same element until that element goes away.
+- **`object_ref` / `element_identifier`**, the AT-SPI identity itself.
 - **A semantic selector** — `role`, `name`, `text`, `states` — when it matches
   exactly one node. More than one and the call refuses rather than guessing.
+  It matches against the cached tree, so it needs a `get_app_state` or
+  `wait_for` in this same server process before it resolves at all.
 - **Coordinates** (`x`, `y`) for `click`, `scroll` and `drag`, in desktop
   pixels; `relative: true` reads them as an offset from the target window's
   origin instead.
+
+Every one of those paths reports the desktop point it landed on, the element
+an index resolved to, and a warning when the compositor puts the pointer
+somewhere other than where the action aimed. Read the point back rather than
+assuming it: that line is the difference between a click that worked and a
+click that landed on whatever was under the cursor.
+
+`drag` travels in small steps between its two ends rather than jumping, so a
+title bar or a reorderable list — anything that reacts to the first movement
+while still under the pointer — sees the drag.
 
 Clicking by index beats clicking a pixel: on an element that exposes an AT-SPI
 click action, `click` invokes the action and never moves the pointer, so it
@@ -70,10 +93,12 @@ does not depend on the window being unobscured. The result says which path ran.
 
 ## The four things that look like bugs
 
-**Element indices die when the application restarts.** They are positions in
-one snapshot of one process's tree. After a relaunch or a crash, call
-`get_app_state` or `wait_for` again. An index used across a restart does not
-error — it points at whatever now sits in that position.
+**Element indices die with their element.** An index is tied to the AT-SPI
+identity it was minted for, which is gone when the view changes or the
+application restarts. Then the call errors and says so, rather than acting on
+whatever took that place — but it is still an error, so a step that reads and
+then acts belongs close together, and after a relaunch the tree is read
+again.
 
 **One process at a time holds the input lock.** It is machine-wide, because
 two servers driving one desktop would interleave their pointer and key events.
@@ -113,6 +138,11 @@ work, and whatever a person had copied is gone. Reach for `set_value` or
 To read text back, use the tree: a text node carries `content`, `caret_offset`
 and `selections`, and `selection_error` when the selection could not be read at
 all, which is a different answer from nothing being selected.
+
+**A GPUI application puts only labeled nodes on the bus.** A caption sitting
+in a plain container is not in the tree at all, so `wait_for(text=...)` times
+out on text that is plainly on screen. Read those by `screenshot` with a
+`region` instead, and keep the tree for the controls.
 
 ## Screenshots
 
