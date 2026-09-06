@@ -103,6 +103,11 @@ pub struct AccessibilityReport {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct WindowingReport {
     pub hyprland: Check,
+    /// The running Hyprland release, and whether it is new enough for the Lua
+    /// dispatchers every window action here speaks. `ok` when the release is
+    /// new enough, and when it could not be read at all -- a release nobody
+    /// could name is not evidence of an old one.
+    pub hyprland_version: Check,
     pub backends: BTreeMap<String, Check>,
     pub can_list_windows: bool,
     pub can_focus_apps: bool,
@@ -662,9 +667,14 @@ fn windowing_report() -> WindowingReport {
         .iter()
         .map(|probe| (probe.id.to_string(), check_from_backend_probe(probe)))
         .collect::<BTreeMap<_, _>>();
+    let hyprland_version = hyprland_version_check();
     let can_list_windows = probes.iter().any(|probe| probe.can_list_windows);
-    let can_focus_apps = probes.iter().any(|probe| probe.can_focus_apps);
-    let can_focus_windows = probes.iter().any(|probe| probe.can_focus_windows);
+    // hyprctl answering says the compositor is reachable; it says nothing
+    // about whether it accepts the dispatchers this build sends, and on a
+    // release older than the floor it accepts none of them.
+    let can_focus_apps = hyprland_version.ok && probes.iter().any(|probe| probe.can_focus_apps);
+    let can_focus_windows =
+        hyprland_version.ok && probes.iter().any(|probe| probe.can_focus_windows);
     let note = if can_list_windows {
         "A Hyprland window backend is available for list_windows, focused_window, and targeted input verification."
     } else {
@@ -674,11 +684,35 @@ fn windowing_report() -> WindowingReport {
 
     WindowingReport {
         hyprland,
+        hyprland_version,
         backends,
         can_list_windows,
         can_focus_apps,
         can_focus_windows,
         note,
+    }
+}
+
+/// Name the Hyprland release, and fail only on one we can prove is too old.
+fn hyprland_version_check() -> Check {
+    release_check(registry::hyprland_release())
+}
+
+fn release_check(release: Option<registry::HyprlandRelease>) -> Check {
+    let (major, minor) = registry::MINIMUM_HYPRLAND_RELEASE;
+    match release {
+        Some(release) if release.drives_lua_dispatchers() => Check::ok(format!(
+            "Hyprland {} speaks the Lua dispatchers ({major}.{minor} or newer).",
+            release.printed
+        )),
+        Some(release) => Check::fail(format!(
+            "Hyprland {} is older than {major}.{minor}, where the Lua dispatchers landed. Every window action here -- focus, move, resize, float -- is dispatched in that form and this release rejects all of it. Upgrade Hyprland.",
+            release.printed
+        )),
+        None => Check::ok(
+            "Could not read hyprctl version; assuming a release that speaks the Lua dispatchers."
+                .to_string(),
+        ),
     }
 }
 
@@ -738,7 +772,11 @@ fn readiness_report(
         );
     }
 
-    if can_query_windows && !can_focus_windows {
+    // Two causes again: a compositor too old to accept any dispatch, and a
+    // backend that cannot focus. The version detail names the fix.
+    if !windowing.hyprland_version.ok {
+        blockers.push(windowing.hyprland_version.detail.clone());
+    } else if can_query_windows && !can_focus_windows {
         blockers.push(
             "Exact window activation is unavailable; app-level focus may work, but window_id/title/terminal-targeted input cannot be verified."
                 .to_string(),
@@ -1094,6 +1132,7 @@ mod tests {
             } else {
                 Check::fail("hyprctl unavailable")
             },
+            hyprland_version: Check::ok("Hyprland 0.56.2 speaks the Lua dispatchers"),
             backends: BTreeMap::new(),
             can_list_windows,
             can_focus_apps: true,
@@ -1381,6 +1420,67 @@ mod tests {
                 .blockers
                 .iter()
                 .any(|blocker| blocker.contains("Exact window activation"))
+        );
+    }
+
+    #[test]
+    fn a_hyprland_too_old_for_the_lua_dispatchers_blocks_window_actions() {
+        let platform = platform_report();
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let windowing = WindowingReport {
+            hyprland_version: Check::fail(
+                "Hyprland 0.54.1 is older than 0.55, where the Lua dispatchers landed.",
+            ),
+            ..windowing_report(true, true)
+        };
+        let input = input_report(true);
+
+        let readiness = readiness_report(&platform, &accessibility, &windowing, &input);
+
+        assert!(
+            readiness
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("older than 0.55")),
+            "{:?}",
+            readiness.blockers
+        );
+        // The generic focus blocker would send the reader to a backend that is
+        // there and working; only the version one names the fix.
+        assert!(
+            !readiness
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("Exact window activation")),
+            "{:?}",
+            readiness.blockers
+        );
+    }
+
+    #[test]
+    fn the_release_check_fails_only_on_a_release_it_can_prove_is_old() {
+        let release = |major, minor, printed: &str| registry::HyprlandRelease {
+            major,
+            minor,
+            printed: printed.to_string(),
+        };
+
+        let current = release_check(Some(release(0, 56, "0.56.2")));
+        assert!(current.ok);
+        assert!(current.detail.contains("0.56.2"), "{}", current.detail);
+
+        let old = release_check(Some(release(0, 54, "0.54.1")));
+        assert!(!old.ok);
+        assert!(old.detail.contains("older than 0.55"), "{}", old.detail);
+        assert!(old.detail.contains("Upgrade Hyprland"), "{}", old.detail);
+
+        // A release nobody could name is not evidence of an old one.
+        let unknown = release_check(None);
+        assert!(unknown.ok);
+        assert!(
+            unknown.detail.contains("Could not read hyprctl version"),
+            "{}",
+            unknown.detail
         );
     }
 

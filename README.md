@@ -38,6 +38,10 @@ refuses.
 `doctor` reports each of these, and says which one is missing when input or
 capture fails.
 
+- **Hyprland 0.55 or newer.** That is where the Lua dispatchers landed and
+  the string ones stopped parsing, and every window action here — focus, move,
+  resize, float — is dispatched in the Lua form. `doctor` names the release it
+  found and says so when it is too old.
 - **`/dev/uinput`, readable and writable by your user.** Both the pointer this
   server creates and `ydotoold` open it. On most distributions that is a
   `uaccess` rule or membership of the `input` group.

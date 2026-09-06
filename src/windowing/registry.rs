@@ -2,7 +2,12 @@ use crate::windowing::backends::hyprland;
 use crate::windowing::types::{WindowInfo, WindowOcclusion};
 use anyhow::{Result, anyhow};
 
-pub use hyprland::HYPRLAND_BACKEND;
+pub use hyprland::{HYPRLAND_BACKEND, HyprlandRelease, MINIMUM_HYPRLAND_RELEASE};
+
+/// The running Hyprland release, or `None` when it cannot be read.
+pub fn hyprland_release() -> Option<HyprlandRelease> {
+    hyprland::release()
+}
 
 pub const WINDOW_PERMISSION_HINT: &str = "Computer Use could not reach Hyprland. Targeted window input needs hyprctl on PATH and a running Hyprland instance whose socket this process can read.";
 

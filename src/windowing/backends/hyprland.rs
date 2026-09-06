@@ -286,6 +286,60 @@ pub async fn activate_window(window_id: u64) -> Result<()> {
         .with_context(|| format!("Hyprland window focus failed for {address}"))
 }
 
+/// The oldest Hyprland this build can drive: the release that introduced the
+/// Lua dispatchers, and stopped parsing the string ones. Everything this
+/// server dispatches -- focus, move, resize, float -- speaks the Lua form, so
+/// an older compositor rejects all of it.
+pub const MINIMUM_HYPRLAND_RELEASE: (u32, u32) = (0, 55);
+
+/// The running Hyprland release, from the first line of `hyprctl version`.
+/// `None` when hyprctl cannot be run or its version line cannot be read.
+pub fn release() -> Option<HyprlandRelease> {
+    let output = hyprctl_output(&["version"]).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_release(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// A Hyprland release as `hyprctl version` states it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HyprlandRelease {
+    pub major: u32,
+    pub minor: u32,
+    /// The version as printed, e.g. `0.56.2`.
+    pub printed: String,
+}
+
+impl HyprlandRelease {
+    /// Whether this release speaks the Lua dispatchers, which is every
+    /// dispatch this server makes.
+    pub fn drives_lua_dispatchers(&self) -> bool {
+        (self.major, self.minor) >= MINIMUM_HYPRLAND_RELEASE
+    }
+}
+
+/// `hyprctl version` opens with `Hyprland 0.56.2 built from branch ...`; a
+/// tagged build may print `v0.56.2`, and a development build may carry a
+/// suffix after the patch number. Only the first two numbers decide.
+fn parse_release(output: &str) -> Option<HyprlandRelease> {
+    let line = output.lines().next()?;
+    let token = line.split_whitespace().find(|token| {
+        token
+            .trim_start_matches('v')
+            .starts_with(|c: char| c.is_ascii_digit())
+    })?;
+    let printed = token.trim_start_matches('v').to_string();
+    let mut numbers = printed.split(['.', '-', '+']).map(str::parse::<u32>);
+    let major = numbers.next()?.ok()?;
+    let minor = numbers.next()?.ok()?;
+    Some(HyprlandRelease {
+        major,
+        minor,
+        printed,
+    })
+}
+
 /// True when this process runs inside a Hyprland session it can reach.
 pub fn is_active() -> bool {
     std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok_and(|value| !value.trim().is_empty())
@@ -944,6 +998,31 @@ mod tests {
             "title": "Sophia"
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn reads_the_release_out_of_the_hyprctl_version_banner() {
+        let release = parse_release(
+            "Hyprland 0.56.2 built from branch v0.56.2 at commit efb5099 clean\nDate: Wed Aug 5\n",
+        )
+        .expect("the banner names a release");
+        assert_eq!((release.major, release.minor), (0, 56));
+        assert_eq!(release.printed, "0.56.2");
+        assert!(release.drives_lua_dispatchers());
+
+        let tagged = parse_release("Hyprland v0.55.0 built from branch main\n").unwrap();
+        assert_eq!(tagged.printed, "0.55.0");
+        assert!(tagged.drives_lua_dispatchers());
+
+        let old = parse_release("Hyprland 0.54.1 built from branch main\n").unwrap();
+        assert!(!old.drives_lua_dispatchers());
+
+        let development =
+            parse_release("Hyprland 0.57.0-3-gabcdef built from branch main").unwrap();
+        assert_eq!((development.major, development.minor), (0, 57));
+
+        assert!(parse_release("").is_none());
+        assert!(parse_release("Hyprland built from branch main\n").is_none());
     }
 
     #[test]

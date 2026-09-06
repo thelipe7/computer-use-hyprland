@@ -24,6 +24,13 @@ refusal.
 So a change that only makes sense on another desktop does not belong here,
 and neither does an abstraction whose only purpose is to leave room for one.
 
+The floor is **Hyprland 0.55**, the release that introduced the Lua
+dispatchers and stopped parsing the string ones — over the raw IPC socket as
+well as through the CLI. Every window action is dispatched in the Lua form, so
+an older compositor rejects all of them, and `doctor` says that in those words
+rather than letting each dispatch fail on its own. Raising the floor is a
+`feat!` and moves the line in the README with it.
+
 ## Git
 
 Pull requests merge by rebase. Every commit lands on the default branch
