@@ -35,6 +35,35 @@ and where the surprises are.
    `timeout_ms`, and returns the tree as it is when it does. Use it instead of
    sleeping: a sleep either wastes the time or is too short.
 
+## A clean bench for the application under test
+
+A window that opens on Hyprland is tiled into whatever workspace is visible,
+at whatever fraction of it the layout leaves. The same application comes up
+947x1024 beside another window and 1904x1024 alone, so anything a test
+measures inherits what the user happened to have open. Give it a bench of its
+own:
+
+1. **`launch_app`** starts it with the window rules applied at the moment the
+   window is mapped: floating, on the first empty workspace, at an exact
+   `width`/`height` when the test needs one. Floating is what gives it the
+   size the program itself asks for — the size it would open at on a desktop
+   that does not tile.
+2. **`move_window_to_workspace` with `workspace: "empty"`** does the same for
+   an application that is already running. The view follows it, because a
+   screenshot captures the visible workspace and the pointer reaches only that
+   one.
+3. **Put the desk back.** Both tools report `previous_workspace`;
+   `focus_workspace` with that id returns the view where it was.
+
+This is for what you launched. A window the user opened is theirs, and moving
+it between workspaces rearranges their desk rather than your bench.
+
+Two consequences of the same fact. Floating first is also what makes
+`move_window` and `resize_window` work at all — they refuse a tiled window.
+And a window that opened tiled does **not** get the program's own size back
+when it is floated afterwards: Hyprland gives it a size it remembers from that
+window's own history. If the size matters, launch with it or resize to it.
+
 ## One selector vocabulary
 
 Every window-targeted tool — `activate_window`, `get_app_state`, `wait_for`,
