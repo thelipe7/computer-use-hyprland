@@ -50,6 +50,18 @@ impl AbsPointerGeometry {
         (x.clamp(0, self.max_x), y.clamp(0, self.max_y))
     }
 
+    /// A point one pixel away from `(x, y)`, or `None` when the desktop has
+    /// no room to move. See [`AbsPointer::move_to`].
+    fn neighbor_of(self, x: i32, y: i32) -> Option<(i32, i32)> {
+        if self.max_x > 0 {
+            Some((if x > 0 { x - 1 } else { x + 1 }, y))
+        } else if self.max_y > 0 {
+            Some((x, if y > 0 { y - 1 } else { y + 1 }))
+        } else {
+            None
+        }
+    }
+
     fn landing_for(self, x: i32, y: i32) -> PointerLanding {
         PointerLanding {
             requested: (x, y),
@@ -61,6 +73,11 @@ impl AbsPointerGeometry {
 pub struct AbsPointer {
     device: VirtualDevice,
     geometry: AbsPointerGeometry,
+    /// The axis values the device currently holds, which start at the zero
+    /// `AbsInfo` was built with. The kernel drops an `EV_ABS` event whose
+    /// value equals the current one, so this is what tells `move_to` that a
+    /// move has to be nudged through.
+    position: (i32, i32),
 }
 
 impl AbsPointer {
@@ -95,21 +112,44 @@ impl AbsPointer {
         // Give udev/libinput time to enumerate the new device.
         sleep(Duration::from_millis(500));
 
-        Ok(Self { device, geometry })
+        Ok(Self {
+            device,
+            geometry,
+            position: (0, 0),
+        })
     }
 
     /// Move the pointer to absolute logical coordinates `(x, y)` and report
     /// both the requested point and the values emitted after edge clamping.
+    ///
+    /// A move to the point the previous move emitted is nudged through a
+    /// neighboring pixel first. The kernel's input core drops an `EV_ABS`
+    /// event whose value equals the axis's current value, so without the
+    /// nudge the second of two moves to the same point emits nothing at all —
+    /// and the pointer stays wherever the compositor warped it in between
+    /// (focusing a window warps the cursor to its center), which is where the
+    /// click that follows would land.
     pub fn move_to(&mut self, x: i32, y: i32) -> Result<PointerLanding> {
         let landing = self.geometry.landing_for(x, y);
         let (emitted_x, emitted_y) = landing.emitted;
+        if (emitted_x, emitted_y) == self.position
+            && let Some((nudge_x, nudge_y)) = self.geometry.neighbor_of(emitted_x, emitted_y)
+        {
+            self.emit_absolute(nudge_x, nudge_y)?;
+        }
+        self.emit_absolute(emitted_x, emitted_y)?;
+        Ok(landing)
+    }
+
+    fn emit_absolute(&mut self, x: i32, y: i32) -> Result<()> {
         self.device
             .emit(&[
-                InputEvent::new_now(EventType::ABSOLUTE.0, AbsoluteAxisCode::ABS_X.0, emitted_x),
-                InputEvent::new_now(EventType::ABSOLUTE.0, AbsoluteAxisCode::ABS_Y.0, emitted_y),
+                InputEvent::new_now(EventType::ABSOLUTE.0, AbsoluteAxisCode::ABS_X.0, x),
+                InputEvent::new_now(EventType::ABSOLUTE.0, AbsoluteAxisCode::ABS_Y.0, y),
             ])
             .context("failed to emit absolute motion")?;
-        Ok(landing)
+        self.position = (x, y);
+        Ok(())
     }
 
     /// Move to `(x, y)` then press+release `button` `count` times.
@@ -209,6 +249,28 @@ mod tests {
             assert_eq!(landing.requested, requested);
             assert_eq!(landing.emitted, emitted);
         }
+    }
+
+    #[test]
+    fn a_repeated_point_has_a_neighbor_to_be_nudged_through() {
+        let geometry = AbsPointerGeometry::from_dimensions(1920, 1080);
+
+        // The kernel drops an EV_ABS event that repeats the current value, so
+        // every point needs somewhere one pixel away to be moved through.
+        for point in [(0, 0), (960, 540), (1919, 1079)] {
+            let neighbor = geometry
+                .neighbor_of(point.0, point.1)
+                .expect("a desktop wider than one pixel always has a neighbor");
+            assert_ne!(neighbor, point);
+            assert_eq!(geometry.clamp_coordinates(neighbor.0, neighbor.1), neighbor);
+        }
+    }
+
+    #[test]
+    fn a_single_pixel_desktop_has_nowhere_to_nudge_through() {
+        let geometry = AbsPointerGeometry::from_dimensions(1, 1);
+
+        assert_eq!(geometry.neighbor_of(0, 0), None);
     }
 
     #[test]
