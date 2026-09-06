@@ -120,6 +120,9 @@ die when the target application restarts, so `get_app_state` or `wait_for` has
 to run again before an index is used against a relaunched process. And only
 one process at a time may hold the input lock, so a second server answers
 `ok=false` naming the holder's pid rather than fighting it for the pointer.
+The lock frees 30 seconds after the holder's last call
+(`COMPUTER_USE_HYPRLAND_LOCK_IDLE_SECS`), so a refusal from a session that has
+gone quiet clears itself; one from a session still calling does not.
 
 ## Dependencies
 

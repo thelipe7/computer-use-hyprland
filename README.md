@@ -145,11 +145,15 @@ resize, then `floating: false` to put the layout back.
 | `COMPUTER_USE_HYPRLAND_ALLOWED_APPS` | Comma-separated `app_id`/`wm_class`/`title` patterns. Input tools refuse a window matching none of them. |
 | `COMPUTER_USE_HYPRLAND_FORCE_YDOTOOL_KEYBOARD=1` | Skips `wtype` and sends literal text through ydotool. |
 | `COMPUTER_USE_HYPRLAND_DISABLE_ABS_POINTER=1` | Skips the uinput absolute pointer, leaving ydotool for the pointer too. |
+| `COMPUTER_USE_HYPRLAND_LOCK_IDLE_SECS` | Seconds without a call before a held input lock is given back. `30` unless set; `0` holds it until the process exits. |
 
 ## Notes
 
 Only one process may hold the input lock at a time; a second server answers
-`ok=false` naming the holder's pid.
+`ok=false` naming the holder's pid. The lock is a lease: every call renews it,
+and it is given back after `COMPUTER_USE_HYPRLAND_LOCK_IDLE_SECS` seconds
+without one (30 unless set), so a session that stopped driving the desktop
+without exiting stops blocking the next one after that long.
 
 Electron applications expose no AT-SPI tree unless launched with
 `--force-renderer-accessibility`.

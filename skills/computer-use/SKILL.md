@@ -77,8 +77,11 @@ error — it points at whatever now sits in that position.
 
 **One process at a time holds the input lock.** It is machine-wide, because
 two servers driving one desktop would interleave their pointer and key events.
-The second answers `ok=false` naming the holder's pid. That is a refusal to
-report, not something to work around.
+The second answers `ok=false` naming the holder's pid and saying when the lock
+frees: 30 seconds after the holder's last call, unless that server's
+`COMPUTER_USE_HYPRLAND_LOCK_IDLE_SECS` says otherwise. Wait that long and retry
+once. A second refusal means the other session is still driving; report it
+rather than work around it.
 
 **Hyprland cannot give a tiled window an exact geometry.** `move_window` and
 `resize_window` refuse a tiled window before dispatching anything: a pixel move

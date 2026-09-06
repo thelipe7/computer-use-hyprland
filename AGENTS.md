@@ -24,6 +24,8 @@ Two traps in a hand-run. Element indices die when the target application
 restarts, so `get_app_state` or `wait_for` runs again before an index is used.
 And one process at a time holds the input lock — a second server answers
 `ok=false` naming the holder's pid rather than fighting it for the pointer.
+The lock frees 30 seconds after the holder's last call, so a refusal from a
+session that has gone quiet clears itself on a retry.
 
 ## A tool description is code
 

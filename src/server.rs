@@ -839,12 +839,13 @@ impl ComputerUseLinux {
     )]
     async fn click(&self, Parameters(mut params): Parameters<ClickParams>) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params.clone()));
-        if let Err(message) = self
+        let _input_lease = match self
             .input_gate("click", params.window_target().as_ref())
             .await
         {
-            return Json(action_failure("click", message, received));
-        }
+            Ok(lease) => lease,
+            Err(message) => return Json(action_failure("click", message, received)),
+        };
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         // Raise the target window first (if specified) so the click lands on the
         // intended app rather than whatever is stacked on top at that pixel.
@@ -1137,13 +1138,16 @@ impl ComputerUseLinux {
         &self,
         Parameters(params): Parameters<ActionParams>,
     ) -> Json<ActionOutput> {
-        if let Err(message) = self.input_gate("perform_action", None).await {
-            return Json(action_failure(
-                "perform_action",
-                message,
-                Some(serde_json::json!(params.clone())),
-            ));
-        }
+        let _input_lease = match self.input_gate("perform_action", None).await {
+            Ok(lease) => lease,
+            Err(message) => {
+                return Json(action_failure(
+                    "perform_action",
+                    message,
+                    Some(serde_json::json!(params.clone())),
+                ));
+            }
+        };
         let requested_action = requested_or_primary_action(params.action.as_deref());
         self.perform_element_action(&params, Some(requested_action))
             .await
@@ -1164,9 +1168,10 @@ impl ComputerUseLinux {
         Parameters(params): Parameters<SetValueParams>,
     ) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params.clone()));
-        if let Err(message) = self.input_gate("set_value", None).await {
-            return Json(action_failure("set_value", message, received));
-        }
+        let _input_lease = match self.input_gate("set_value", None).await {
+            Ok(lease) => lease,
+            Err(message) => return Json(action_failure("set_value", message, received)),
+        };
         let object_ref = match self.resolve_object_ref(
             params.element_index,
             params
@@ -1225,12 +1230,13 @@ impl ComputerUseLinux {
     )]
     async fn scroll(&self, Parameters(mut params): Parameters<ScrollParams>) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params.clone()));
-        if let Err(message) = self
+        let _input_lease = match self
             .input_gate("scroll", params.window_target().as_ref())
             .await
         {
-            return Json(action_failure("scroll", message, received));
-        }
+            Ok(lease) => lease,
+            Err(message) => return Json(action_failure("scroll", message, received)),
+        };
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         #[expect(
             clippy::cast_possible_truncation,
@@ -1404,13 +1410,16 @@ impl ComputerUseLinux {
         )
     )]
     async fn drag(&self, Parameters(params): Parameters<DragParams>) -> Json<ActionOutput> {
-        if let Err(message) = self.input_gate("drag", None).await {
-            return Json(action_failure(
-                "drag",
-                message,
-                Some(serde_json::json!(params)),
-            ));
-        }
+        let _input_lease = match self.input_gate("drag", None).await {
+            Ok(lease) => lease,
+            Err(message) => {
+                return Json(action_failure(
+                    "drag",
+                    message,
+                    Some(serde_json::json!(params)),
+                ));
+            }
+        };
         let held_modifiers = match modifier_keycodes(&params.modifiers) {
             Ok(codes) => codes,
             Err(message) => {
@@ -1610,12 +1619,13 @@ impl ComputerUseLinux {
         Parameters(params): Parameters<PressKeyParams>,
     ) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params.clone()));
-        if let Err(message) = self
+        let _input_lease = match self
             .input_gate("press_key", Some(&params.window_target()))
             .await
         {
-            return Json(action_failure("press_key", message, received));
-        }
+            Ok(lease) => lease,
+            Err(message) => return Json(action_failure("press_key", message, received)),
+        };
         let keys = match press_key_sequence(params.key.as_deref(), &params.keys) {
             Ok(keys) => keys,
             Err(message) => {
@@ -1735,12 +1745,13 @@ impl ComputerUseLinux {
         Parameters(params): Parameters<TypeTextParams>,
     ) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params.clone()));
-        if let Err(message) = self
+        let _input_lease = match self
             .input_gate("type_text", Some(&params.window_target()))
             .await
         {
-            return Json(action_failure("type_text", message, received));
-        }
+            Ok(lease) => lease,
+            Err(message) => return Json(action_failure("type_text", message, received)),
+        };
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let focus = match self.focus_target_for_input(&params.window_target()).await {
             Ok(focus) => focus,
@@ -1875,9 +1886,21 @@ impl ComputerUseLinux {
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
     version = "0.1.0",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. This server drives one desktop: Hyprland on Wayland. Windows come from hyprctl, the accessibility tree from AT-SPI, screenshots from the XDG Screenshot portal, and every input event from uinput -- an absolute pointer device for click, scroll and drag, wtype for literal text, and ydotool for keys and chords. There is no RemoteDesktop portal on Hyprland and this build does not look for one. Use list_windows/focused_window before targeted keyboard input. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. A window-targeted screenshot raises the window first; with raise_window=false the caption lists occluded_by so overlapping pixels are not mistaken for the target's own. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action and set_value can also use semantic role/name/text/states selectors when the target is unique. A plain left click on an element that exposes an AT-SPI click action invokes that action and never moves the pointer; the message says which path ran. Every window-targeted tool takes the same nine selectors -- window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, terminal_cwd -- and they refuse targeted input if focus cannot be verified. click, scroll and drag also accept relative coordinates, and drag accepts start_element_index/end_element_index; each reports the desktop point every end resolved to. On wait_for, window_title is a predicate, not a selector: the substring the target window's title must contain. After click, drag, perform_action, press_key and type_text, results append focused-element feedback from AT-SPI (role, name, editable, states) and warn when no editable element holds focus after typing -- treat that warning as the input not landing; element clicks and actions also report the element's states before -> after when they changed. When an element operation answers that the cached accessibility tree is stale, call get_app_state again before retrying. wait_for polls until an element selector, a window title substring, or a focused window holds and returns the element with its index in a freshly cached tree. pointer_position reports the pointer's desktop coordinates. Hyprland cannot give a tiled window an exact geometry, so move_window and resize_window refuse one without dispatching anything; call set_window_floating with floating=true, retry, then set_window_floating with floating=false to restore the layout. The first input action of this process takes a machine-wide session lock; another server process gets ok=false naming the holder's pid. When COMPUTER_USE_HYPRLAND_ALLOWED_APPS is set, input tools refuse windows matching none of its app_id/wm_class/title patterns. Screenshot, click and input results warn when the target window or coordinate is partially or fully off-screen. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
+    instructions = "Begin every turn that uses Computer Use by calling get_app_state. This server drives one desktop: Hyprland on Wayland. Windows come from hyprctl, the accessibility tree from AT-SPI, screenshots from the XDG Screenshot portal, and every input event from uinput -- an absolute pointer device for click, scroll and drag, wtype for literal text, and ydotool for keys and chords. There is no RemoteDesktop portal on Hyprland and this build does not look for one. Use list_windows/focused_window before targeted keyboard input. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. A window-targeted screenshot raises the window first; with raise_window=false the caption lists occluded_by so overlapping pixels are not mistaken for the target's own. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action and set_value can also use semantic role/name/text/states selectors when the target is unique. A plain left click on an element that exposes an AT-SPI click action invokes that action and never moves the pointer; the message says which path ran. Every window-targeted tool takes the same nine selectors -- window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, terminal_cwd -- and they refuse targeted input if focus cannot be verified. click, scroll and drag also accept relative coordinates, and drag accepts start_element_index/end_element_index; each reports the desktop point every end resolved to. On wait_for, window_title is a predicate, not a selector: the substring the target window's title must contain. After click, drag, perform_action, press_key and type_text, results append focused-element feedback from AT-SPI (role, name, editable, states) and warn when no editable element holds focus after typing -- treat that warning as the input not landing; element clicks and actions also report the element's states before -> after when they changed. When an element operation answers that the cached accessibility tree is stale, call get_app_state again before retrying. wait_for polls until an element selector, a window title substring, or a focused window holds and returns the element with its index in a freshly cached tree. pointer_position reports the pointer's desktop coordinates. Hyprland cannot give a tiled window an exact geometry, so move_window and resize_window refuse one without dispatching anything; call set_window_floating with floating=true, retry, then set_window_floating with floating=false to restore the layout. The first input action of this process takes a machine-wide session lock, every call renews it, and it frees after COMPUTER_USE_HYPRLAND_LOCK_IDLE_SECS seconds without a call (30 unless set; 0 holds it until exit); another server process gets ok=false naming the holder's pid, and the right response is to wait that long and retry once. When COMPUTER_USE_HYPRLAND_ALLOWED_APPS is set, input tools refuse windows matching none of its app_id/wm_class/title patterns. Screenshot, click and input results warn when the target window or coordinate is partially or fully off-screen. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
 )]
-impl ServerHandler for ComputerUseLinux {}
+impl ServerHandler for ComputerUseLinux {
+    /// Every call renews the session lease before it is dispatched, so a
+    /// session reading the screen between two inputs keeps its input lock.
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> std::result::Result<rmcp::model::CallToolResponse, ErrorData> {
+        crate::session_lock::touch_input_lock();
+        let call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        self.mcp_tool_router().call(call).await
+    }
+}
 
 /// The `COMPUTER_USE_HYPRLAND_ALLOWED_APPS` patterns, or `None` when the
 /// variable is unset or blank (no restriction).
@@ -3096,16 +3119,18 @@ impl ComputerUseLinux {
 
     /// Every input tool passes here first: the machine-wide session lock, then
     /// the `COMPUTER_USE_HYPRLAND_ALLOWED_APPS` check against the window the
-    /// action targets (the focused window when it targets none).
+    /// action targets (the focused window when it targets none). The guard it
+    /// returns is this operation's hold on the lock: keep it alive until the
+    /// input has been sent, or the idle timer may free the lock half-way.
     async fn input_gate(
         &self,
         action: &str,
         target: Option<&WindowTarget>,
-    ) -> std::result::Result<(), String> {
-        crate::session_lock::acquire_input_lock()?;
+    ) -> std::result::Result<crate::session_lock::InputLeaseGuard, String> {
+        let lease = crate::session_lock::acquire_input_lock()?;
         let Some(patterns) = allowed_app_patterns(env::var(ALLOWED_APPS_ENV).ok().as_deref())
         else {
-            return Ok(());
+            return Ok(lease);
         };
         let window = match target.filter(|target| target.has_target()) {
             Some(target) => {
@@ -3126,7 +3151,7 @@ impl ComputerUseLinux {
                 })?,
         };
         if window_matches_allowlist(&window, &patterns) {
-            Ok(())
+            Ok(lease)
         } else {
             Err(format!(
                 "Refused {action}: window_id {} (app_id {:?}, wm_class {:?}, title {:?}) matches none of the {ALLOWED_APPS_ENV} patterns [{}].",
@@ -3432,20 +3457,23 @@ impl ComputerUseLinux {
         F: FnOnce(crate::windowing::WindowInfo) -> Fut,
         Fut: Future<Output = Result<String>>,
     {
-        if let Err(message) = self
+        let _input_lease = match self
             .input_gate("move_window/resize_window", Some(target))
             .await
         {
-            return Json(WindowGeometryOutput {
-                ok: false,
-                implemented: true,
-                backend: "unknown".to_string(),
-                window: None,
-                message,
-                permissions_hint: None,
-                received,
-            });
-        }
+            Ok(lease) => lease,
+            Err(message) => {
+                return Json(WindowGeometryOutput {
+                    ok: false,
+                    implemented: true,
+                    backend: "unknown".to_string(),
+                    window: None,
+                    message,
+                    permissions_hint: None,
+                    received,
+                });
+            }
+        };
         let windows = match list_windows().await {
             Ok(windows) => windows,
             Err(error) => {
@@ -5104,7 +5132,16 @@ where
 {
     // Dropping a JoinHandle detaches its task, retaining the guard until the
     // stateful input operation has completed even if the caller is cancelled.
-    match tokio::spawn(async move { (input_guard, operation.await) }).await {
+    // The session lease rides along for the same reason: the caller's own
+    // hold dies with the caller, and the idle timer must not free the
+    // machine-wide lock while the detached half is still sending input.
+    let session_lease = crate::session_lock::hold_input_lock();
+    match tokio::spawn(async move {
+        let _session_lease = session_lease;
+        (input_guard, operation.await)
+    })
+    .await
+    {
         Ok((input_guard, result)) => (Some(input_guard), result),
         Err(error) => (None, Err(format!("stateful input task failed: {error}"))),
     }

@@ -122,6 +122,11 @@ tokio = { version = "1.53.1", features = [
 ] }
 zbus = "5.19.0"
 
+[dev-dependencies]
+# `start_paused` in the session-lock tests, so an idle window of thirty
+# seconds is crossed by moving the clock rather than waiting for it.
+tokio = { version = "1.53.1", features = ["test-util"] }
+
 # Dependencies dominate a debug build's runtime here — image decoding, PNG
 # encoding, the base64 of a screenshot — and they rarely change.
 
