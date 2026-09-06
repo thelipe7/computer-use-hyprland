@@ -121,7 +121,10 @@ from an input-backend one.
 `get_app_state`, `wait_for`, `screenshot`, `pointer_position`.
 
 **Windows** — `activate_window`, `move_window`, `resize_window`,
-`set_window_floating`.
+`set_window_floating`, `focus_workspace`, `move_window_to_workspace`.
+
+**Starting an application** — `launch_app`, which opens it floating on an
+empty workspace, so its geometry does not depend on what else was open.
 
 **Input** — `click`, `drag`, `scroll`, `press_key`, `type_text`,
 `perform_action`, `set_value`.
