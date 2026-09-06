@@ -65,6 +65,10 @@ const SHELL_MAX_CWD_BYTES: usize = 4096;
 const SHELL_MAX_ENV_ENTRIES: usize = 64;
 const SHELL_MAX_ENV_BYTES: usize = 64 * 1024;
 const SHELL_RESPONSE_STREAM_BYTES: usize = 512 * 1024;
+/// How far the compositor's pointer position may sit from the point a
+/// pointer action emitted before the result says so. One pixel of slack
+/// absorbs fractional-scaling rounding; anything more is a lost event.
+const POINTER_LANDING_TOLERANCE: i32 = 1;
 /// Tail of the note explaining a point that could not be moved onto the
 /// desktop, and how to make it resolvable.
 const UNANCHORED_BOUNDS_NOTE: &str = "but the tree's bounds are window-relative and no window origin was available, so they were not offset to desktop coordinates and the pointer will miss. Call get_app_state again with pid or window_id so the tree is tied to its window.";
@@ -829,7 +833,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "click",
-        description = "Click an element by index, object_ref, semantic selector, or desktop coordinate pixels from screenshot metadata. A plain left click on an element that exposes an AT-SPI click action invokes that action first and only falls back to the pointer; the message says which path was used. `modifiers` (ctrl/alt/shift/meta) are held around a pointer click.",
+        description = "Click an element by index, object_ref, semantic selector, or desktop coordinate pixels from screenshot metadata. A plain left click on an element that exposes an AT-SPI click action invokes that action first and only falls back to the pointer; the message says which path was used. `modifiers` (ctrl/alt/shift/meta) are held around a pointer click. A pointer click reports the desktop point it landed on, and warns when the compositor reports the pointer somewhere else.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -904,7 +908,8 @@ impl ComputerUseLinux {
                 return Json(action_failure("click", message, received));
             }
         };
-        let (element_index, object_ref, action, point, bounds_offset, states) = match target {
+        let (element_index, label, object_ref, action, point, bounds_offset, states) = match target
+        {
             ClickTarget::Coordinates(x, y) => {
                 let output = self
                     .click_at_point_with_modifiers(
@@ -924,6 +929,7 @@ impl ComputerUseLinux {
             }
             ClickTarget::Element {
                 element_index,
+                label,
                 object_ref,
                 action,
                 point,
@@ -931,6 +937,7 @@ impl ComputerUseLinux {
                 states,
             } => (
                 element_index,
+                label,
                 object_ref,
                 action,
                 point,
@@ -973,7 +980,7 @@ impl ComputerUseLinux {
                             implemented: true,
                             action: "click".to_string(),
                             message: format!(
-                                "Invoked {action_label} on element_index {element_index}; the pointer was not used."
+                                "Invoked {action_label} on element_index {element_index} ({label}); the pointer was not used."
                             ),
                             received,
                         },
@@ -1007,13 +1014,13 @@ impl ComputerUseLinux {
         };
         notes.push(match (bounds_offset, &bounds) {
             (Some((dx, dy)), _) => format!(
-                "element_index {element_index} resolved to desktop point ({x}, {y}): the tree's window-relative bounds were offset by the window origin ({dx}, {dy})."
+                "element_index {element_index} ({label}) resolved to desktop point ({x}, {y}): the tree's window-relative bounds were offset by the window origin ({dx}, {dy})."
             ),
             (None, CachedBounds::Unanchored) => {
-                format!("element_index {element_index} resolved to point ({x}, {y}), {UNANCHORED_BOUNDS_NOTE}")
+                format!("element_index {element_index} ({label}) resolved to point ({x}, {y}), {UNANCHORED_BOUNDS_NOTE}")
             }
             (None, _) => {
-                format!("element_index {element_index} resolved to desktop point ({x}, {y}).")
+                format!("element_index {element_index} ({label}) resolved to desktop point ({x}, {y}).")
             }
         });
         let output = self
@@ -1092,15 +1099,22 @@ impl ComputerUseLinux {
             )
             .await
         {
+            let (emitted_x, emitted_y) = landing.emitted;
+            let mut notes = abs_pointer_clamp_note(landing)
+                .into_iter()
+                .collect::<Vec<_>>();
+            notes.extend(self.pointer_landing_note(landing.emitted).await);
             return Json(with_notes(
                 ActionOutput {
                     ok: true,
                     implemented: true,
                     action: "click".to_string(),
-                    message: "Action sent through the uinput absolute pointer.".to_string(),
+                    message: format!(
+                        "Action sent through the uinput absolute pointer at desktop point ({emitted_x}, {emitted_y})."
+                    ),
                     received,
                 },
-                abs_pointer_clamp_note(landing),
+                notes,
             ));
         }
         let off_screen_note = self.off_screen_note_for_point(x, y).await;
@@ -1385,8 +1399,12 @@ impl ComputerUseLinux {
             // The absolute pointer lands exactly where the click path does;
             // ydotool's faked absolute move drifts under acceleration and
             // scaling, so it is only the fallback for positioning the wheel.
-            if self.try_abs_move(x, y).await.is_none() {
-                sequence.push(absolute_mousemove_args(x, y));
+            match self.try_abs_move(x, y).await {
+                Some(landing) => {
+                    point_notes.extend(abs_pointer_clamp_note(landing));
+                    point_notes.extend(self.pointer_landing_note(landing.emitted).await);
+                }
+                None => sequence.push(absolute_mousemove_args(x, y)),
             }
         }
         sequence.push(wheel_mousemove_args(dx, dy));
@@ -1535,12 +1553,15 @@ impl ComputerUseLinux {
                         "No bounds cached for {label}_element_index {element_index}. Call get_app_state first and choose a node with positive width and height."
                     )
                 })?;
+            let element = self
+                .cached_node_label(element_index)
+                .unwrap_or_else(|| "unknown element".to_string());
             let note = match offset {
                 Some((dx, dy)) => format!(
-                    "{label}_element_index {element_index} resolved to desktop point ({px}, {py}): the tree's window-relative bounds were offset by the window origin ({dx}, {dy})."
+                    "{label}_element_index {element_index} ({element}) resolved to desktop point ({px}, {py}): the tree's window-relative bounds were offset by the window origin ({dx}, {dy})."
                 ),
                 None => format!(
-                    "{label}_element_index {element_index} resolved to desktop point ({px}, {py})."
+                    "{label}_element_index {element_index} ({element}) resolved to desktop point ({px}, {py})."
                 ),
             };
             return Ok(((px, py), note));
@@ -3545,6 +3566,26 @@ impl ComputerUseLinux {
         }
     }
 
+    /// Where the compositor says the pointer actually is, when that is not
+    /// where the pointer backend was told to put it.
+    ///
+    /// The check exists because a lost motion event is invisible otherwise:
+    /// the backend reports success, and the button lands wherever the cursor
+    /// happened to be. Costs one `hyprctl` round trip per pointer action, and
+    /// stays quiet when the two agree or when the compositor cannot be asked.
+    async fn pointer_landing_note(&self, expected: (i32, i32)) -> Option<String> {
+        let ((actual_x, actual_y), _) = registry::pointer_position().await.ok()??;
+        let (expected_x, expected_y) = expected;
+        let off_by = (actual_x - expected_x)
+            .abs()
+            .max((actual_y - expected_y).abs());
+        (off_by > POINTER_LANDING_TOLERANCE).then(|| {
+            format!(
+                "WARNING: the compositor reports the pointer at ({actual_x}, {actual_y}), not the ({expected_x}, {expected_y}) this action asked for, so it landed there instead. Something moved the cursor after the motion was emitted."
+            )
+        })
+    }
+
     /// Notes appended after targeted keyboard input: off-screen window warning
     /// plus focused-element feedback.
     async fn input_landing_notes(
@@ -3836,12 +3877,23 @@ impl ComputerUseLinux {
 
         Ok(ClickTarget::Element {
             element_index: node.index,
+            label: describe_cached_node(&node),
             object_ref: node.object_ref.clone(),
             action: action.cloned(),
             point,
             bounds_offset: point.and(offset).filter(|offset| *offset != (0, 0)),
             states: node.states,
         })
+    }
+
+    /// How the cached tree describes an element, for a note that says what
+    /// was acted on and not only where it was.
+    fn cached_node_label(&self, element_index: u32) -> Option<String> {
+        let cached = self.last_nodes.lock().ok()?;
+        cached
+            .iter()
+            .find(|node| node.index == element_index)
+            .map(describe_cached_node)
     }
 
     fn center_for_cached_node(
@@ -4010,6 +4062,9 @@ enum ClickTarget {
     /// any, and the desktop point for the pointer fallback, if it has bounds.
     Element {
         element_index: u32,
+        /// The element in the terms the tree shows it, so a note names what
+        /// was clicked and not only where.
+        label: String,
         object_ref: String,
         action: Option<AccessibilityAction>,
         point: Option<(i32, i32)>,
@@ -4176,6 +4231,15 @@ fn normalize_text(value: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase()
+}
+
+/// An element in the terms the tree shows it: its role, and its name when it
+/// has one.
+fn describe_cached_node(node: &AccessibilityNode) -> String {
+    match trimmed_nonempty(node.name.as_deref()) {
+        Some(name) => format!("{} {name:?}", node.role),
+        None => node.role.clone(),
+    }
 }
 
 fn describe_selector(selector: &ElementSelector<'_>) -> String {
