@@ -23,7 +23,6 @@ pub async fn focus_window_target(target: &WindowTarget) -> Result<WindowFocusRes
 
     let windows = list_windows().await?;
     let requested_window = resolve_window_target(&windows, target)?.clone();
-    ensure_backend_can_focus_target(target, &requested_window)?;
 
     registry::activate_window(&requested_window).await?;
 
@@ -46,19 +45,6 @@ pub async fn focus_window_target(target: &WindowTarget) -> Result<WindowFocusRes
     })
 }
 
-pub(crate) fn ensure_backend_can_focus_target(
-    target: &WindowTarget,
-    window: &WindowInfo,
-) -> Result<()> {
-    if target.requires_exact_focus() && !registry::backend_can_exact_focus(&window.backend) {
-        bail!(
-            "Exact window targeting requires an exact-focus window backend; {} can list the matched window but cannot activate a specific window safely.",
-            window.backend
-        );
-    }
-    Ok(())
-}
-
 async fn current_focused_window() -> Result<Option<WindowInfo>> {
     Ok(list_windows()
         .await?
@@ -67,9 +53,11 @@ async fn current_focused_window() -> Result<Option<WindowInfo>> {
 }
 
 async fn wait_for_focused_window(requested_window: &WindowInfo) -> Option<WindowInfo> {
-    wait_for_focused_window_with(requested_window, FOCUS_VERIFY_TIMEOUT, || {
-        registry::focused_window_for_backend(&requested_window.backend)
-    })
+    wait_for_focused_window_with(
+        requested_window,
+        FOCUS_VERIFY_TIMEOUT,
+        registry::focused_window,
+    )
     .await
 }
 

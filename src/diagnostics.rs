@@ -655,26 +655,16 @@ fn accessibility_report(at_spi_connect: Check) -> AccessibilityReport {
 }
 
 fn windowing_report() -> WindowingReport {
-    let probes = registry::probe_backends();
-    let hyprland = probes
-        .iter()
-        .find(|probe| probe.id == HYPRLAND_BACKEND)
-        .map_or_else(
-            || Check::fail("backend probe did not run"),
-            check_from_backend_probe,
-        );
-    let backends = probes
-        .iter()
-        .map(|probe| (probe.id.to_string(), check_from_backend_probe(probe)))
-        .collect::<BTreeMap<_, _>>();
+    let probe = registry::probe_backend();
+    let hyprland = check_from_backend_probe(&probe);
+    let backends = BTreeMap::from([(probe.id.to_string(), check_from_backend_probe(&probe))]);
     let hyprland_version = hyprland_version_check();
-    let can_list_windows = probes.iter().any(|probe| probe.can_list_windows);
+    let can_list_windows = probe.can_list_windows;
     // hyprctl answering says the compositor is reachable; it says nothing
     // about whether it accepts the dispatchers this build sends, and on a
     // release older than the floor it accepts none of them.
-    let can_focus_apps = hyprland_version.ok && probes.iter().any(|probe| probe.can_focus_apps);
-    let can_focus_windows =
-        hyprland_version.ok && probes.iter().any(|probe| probe.can_focus_windows);
+    let can_focus_apps = hyprland_version.ok && probe.can_focus_apps;
+    let can_focus_windows = hyprland_version.ok && probe.can_focus_windows;
     let note = if can_list_windows {
         "A Hyprland window backend is available for list_windows, focused_window, and targeted input verification."
     } else {

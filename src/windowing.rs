@@ -22,7 +22,6 @@ pub use types::{WindowBounds, WindowFocusResult, WindowInfo, WindowOcclusion, Wi
 mod tests {
     use super::backends::hyprland::parse_hyprland_clients;
     use super::registry::WINDOW_PERMISSION_HINT;
-    use super::target::ensure_backend_can_focus_target;
     use super::*;
     use crate::terminal::{TerminalProcess, TerminalWindowContext};
 
@@ -449,20 +448,5 @@ mod tests {
         assert_eq!(windows[0].backend, HYPRLAND_BACKEND);
         assert!(windows[1].focused);
         assert_eq!(windows[2].pid, None);
-    }
-
-    #[test]
-    fn hyprland_backend_can_exact_focus_targets() {
-        let mut window = window(2, "Codex", "codex-desktop", "codex-desktop");
-        window.backend = HYPRLAND_BACKEND.to_string();
-
-        ensure_backend_can_focus_target(
-            &WindowTarget {
-                title: Some("Codex".to_string()),
-                ..Default::default()
-            },
-            &window,
-        )
-        .unwrap();
     }
 }
