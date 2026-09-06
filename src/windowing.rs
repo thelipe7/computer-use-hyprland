@@ -8,7 +8,10 @@ pub use target::{
     focus_window_target, focused_window, list_windows, resolve_window_target,
     window_permission_hint,
 };
-pub use types::{WindowBounds, WindowFocusResult, WindowInfo, WindowOcclusion, WindowTarget};
+pub use types::{
+    WindowBounds, WindowFocusResult, WindowInfo, WindowOcclusion, WindowTarget, WorkspaceSummary,
+    WorkspaceTarget,
+};
 
 #[cfg(test)]
 #[expect(

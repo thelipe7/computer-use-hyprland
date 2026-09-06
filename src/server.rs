@@ -13,8 +13,9 @@ use crate::screenshot::{
 };
 use crate::windowing::registry;
 use crate::windowing::{
-    WindowFocusResult, WindowInfo, WindowOcclusion, WindowTarget, focus_window_target,
-    focused_window, list_windows, resolve_window_target, window_permission_hint,
+    WindowFocusResult, WindowInfo, WindowOcclusion, WindowTarget, WorkspaceSummary,
+    WorkspaceTarget, focus_window_target, focused_window, list_windows, resolve_window_target,
+    window_permission_hint,
 };
 use crate::ydotool;
 
@@ -1923,6 +1924,60 @@ impl ComputerUseLinux {
     }
 
     #[tool(
+        name = "focus_workspace",
+        description = "Show a workspace. `workspace` is a workspace id -- the number list_windows reports for every window -- or \"empty\" for the first workspace with nothing on it, which Hyprland picks. The result names the workspace the view was on before, which is how to put it back when the work is done. Use it to give an application under test a workspace of its own: a window that opens next to another is tiled to share the space, so its geometry depends on whatever else was open, and screenshots and pointer input only reach the visible workspace.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn focus_workspace(
+        &self,
+        Parameters(params): Parameters<FocusWorkspaceParams>,
+    ) -> Json<WorkspaceOutput> {
+        let received = Some(serde_json::json!(params.clone()));
+        let failure = |message: String| {
+            Json(WorkspaceOutput {
+                ok: false,
+                implemented: true,
+                workspace: None,
+                previous_workspace: None,
+                message,
+                received: received.clone(),
+            })
+        };
+        let target = match WorkspaceTarget::parse(&params.workspace) {
+            Ok(target) => target,
+            Err(error) => return failure(format!("{error:#}")),
+        };
+        let _input_lease = match self.input_gate("focus_workspace", None).await {
+            Ok(lease) => lease,
+            Err(message) => return failure(message),
+        };
+        match registry::focus_workspace(target).await {
+            Ok(change) => {
+                let previous = change.previous.id;
+                let current = &change.current;
+                let message = format!(
+                    "Workspace {} ({}) is visible, with {} window(s) on it. The view was on workspace {previous}; pass workspace=\"{previous}\" to put it back.",
+                    current.id, current.name, current.windows
+                );
+                Json(WorkspaceOutput {
+                    ok: true,
+                    implemented: true,
+                    workspace: Some(change.current),
+                    previous_workspace: Some(change.previous),
+                    message,
+                    received,
+                })
+            }
+            Err(error) => failure(format!("Could not show {}: {error:#}", target.describe())),
+        }
+    }
+
+    #[tool(
         name = "set_window_floating",
         description = "Float a window, or tile it again. On Hyprland a tiled window cannot be given an exact geometry, so move_window and resize_window refuse one; this is how to clear that refusal. Float the window, move or resize it, then tile it again to restore the layout. Reports the state Hyprland ended up in.",
         annotations(
@@ -2342,6 +2397,27 @@ struct ActivateWindowOutput {
     // schema, which strict MCP clients (Claude Code) reject in `outputSchema` —
     // and one invalid tool fails the whole tool list. Keep it in the runtime
     // response (serde) but omit it from the generated schema.
+    #[schemars(skip)]
+    received: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct FocusWorkspaceParams {
+    /// The workspace to show: an id (the number `list_windows` reports for
+    /// each window) or `"empty"` for the first workspace with nothing on it.
+    workspace: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+struct WorkspaceOutput {
+    ok: bool,
+    implemented: bool,
+    /// The workspace the view is on now.
+    workspace: Option<WorkspaceSummary>,
+    /// The workspace the view was on before the call, so a caller can put it
+    /// back where it found it.
+    previous_workspace: Option<WorkspaceSummary>,
+    message: String,
     #[schemars(skip)]
     received: Option<serde_json::Value>,
 }

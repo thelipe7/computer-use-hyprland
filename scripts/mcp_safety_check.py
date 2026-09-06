@@ -26,6 +26,7 @@ EXPECTED_TOOLS = {
     "screenshot",
     "pointer_position",
     "activate_window",
+    "focus_workspace",
     "move_window",
     "resize_window",
     "set_window_floating",
@@ -128,6 +129,7 @@ NON_DESTRUCTIVE_MUTATING_TOOLS = EXPECTED_TOOLS - READ_ONLY_TOOLS - DESTRUCTIVE_
 IDEMPOTENT_TOOLS = READ_ONLY_TOOLS | {
     "setup_accessibility",
     "activate_window",
+    "focus_workspace",
     "move_window",
     "resize_window",
     "set_window_floating",

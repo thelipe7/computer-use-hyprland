@@ -1,7 +1,9 @@
 use crate::command_runner;
 use crate::terminal::enrich_terminal_windows;
 use crate::windowing::registry::BackendProbe;
-use crate::windowing::types::{WindowBounds, WindowInfo, WindowOcclusion};
+use crate::windowing::types::{
+    WindowBounds, WindowInfo, WindowOcclusion, WorkspaceChange, WorkspaceSummary, WorkspaceTarget,
+};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::fs;
@@ -284,6 +286,55 @@ pub async fn activate_window(window_id: u64) -> Result<()> {
     run_lua_dispatch(&lua_focus_dispatch(&address))
         .await
         .with_context(|| format!("Hyprland window focus failed for {address}"))
+}
+
+/// The workspace the view is on right now.
+pub async fn active_workspace() -> Result<WorkspaceSummary> {
+    let output = hyprctl_output_async(&["activeworkspace", "-j"])
+        .await
+        .context("failed to run hyprctl activeworkspace -j")?;
+    if !output.status.success() {
+        bail!(
+            "hyprctl activeworkspace -j failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    serde_json::from_slice(&output.stdout)
+        .context("failed to parse hyprctl activeworkspace -j output")
+}
+
+/// Move the view to another workspace, reporting where it was so a caller can
+/// put it back.
+pub async fn focus_workspace(target: WorkspaceTarget) -> Result<WorkspaceChange> {
+    let previous = active_workspace().await?;
+    run_lua_dispatch(&lua_workspace_focus_dispatch(target)).await?;
+    let current = wait_for_active_workspace(|workspace| {
+        target.reached(workspace.id, Some(previous.id))
+            || (target == WorkspaceTarget::FirstEmpty && workspace.windows == 0)
+    })
+    .await?;
+    Ok(WorkspaceChange { previous, current })
+}
+
+fn lua_workspace_focus_dispatch(target: WorkspaceTarget) -> String {
+    format!("hl.dsp.focus({{ workspace = {} }})", target.lua_value())
+}
+
+async fn wait_for_active_workspace(
+    reached: impl Fn(&WorkspaceSummary) -> bool,
+) -> Result<WorkspaceSummary> {
+    let mut last = None;
+    for attempt in 0..GEOMETRY_VERIFY_ATTEMPTS {
+        let workspace = active_workspace().await?;
+        if reached(&workspace) {
+            return Ok(workspace);
+        }
+        last = Some(workspace);
+        if attempt + 1 < GEOMETRY_VERIFY_ATTEMPTS {
+            sleep(GEOMETRY_VERIFY_DELAY).await;
+        }
+    }
+    last.context("Hyprland did not report an active workspace after the request")
 }
 
 /// The oldest Hyprland this build can drive: the release that introduced the
