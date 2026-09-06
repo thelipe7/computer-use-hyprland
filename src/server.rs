@@ -449,6 +449,9 @@ impl ComputerUseLinux {
                 " Window target resolved to window_id {}.",
                 window.window_id
             );
+            if let Some(note) = cross_process_tree_note(window, &root_pids) {
+                let _ = write!(message, " {note}");
+            }
         } else if let Some(error) = &window_error {
             let _ = write!(message, " Window target resolution failed: {error}");
         } else if let Some(window) = &bounds_window {
@@ -4715,6 +4718,30 @@ fn select_accessibility_object_ref(
         .or_else(|| Some(first.object_ref.clone()))
 }
 
+/// The warning for a tree that came from a different process than the window
+/// the caller targeted.
+///
+/// It happens because the AT-SPI application is looked up by pid first and by
+/// name second, and the name fallback is what makes a wrapper, a Flatpak or
+/// any app whose window pid is not its bus pid readable at all. So the
+/// fallback stays and says so, rather than answering with a tree from an
+/// application the caller never named while `window_context` describes
+/// another one.
+fn cross_process_tree_note(window: &WindowInfo, root_pids: &[u32]) -> Option<String> {
+    let window_pid = window.pid?;
+    if root_pids.is_empty() || root_pids.contains(&window_pid) {
+        return None;
+    }
+    let pids = root_pids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "WARNING: the accessibility tree came from pid {pids}, not the target window's process (pid {window_pid}), so the tree and window_context describe different applications; the AT-SPI application was matched by name because that pid exposes none. Element coordinates are offset by this window's origin, which is only right if they are the same application."
+    ))
+}
+
 fn accessibility_filter_candidates(window_context: Option<&WindowInfo>) -> Vec<String> {
     let Some(window) = window_context else {
         return Vec::new();
@@ -5826,6 +5853,20 @@ mod tests {
             error.contains(&format!("element_index {details}")),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_tree_from_another_process_than_the_window_says_so() {
+        let window = WindowInfo {
+            pid: Some(4242),
+            ..placed_window(Some(8), Some(48))
+        };
+
+        assert!(cross_process_tree_note(&window, &[4242]).is_none());
+        assert!(cross_process_tree_note(&window, &[]).is_none());
+        let note = cross_process_tree_note(&window, &[99]).expect("a foreign pid is worth saying");
+        assert!(note.contains("pid 99"), "{note}");
+        assert!(note.contains("pid 4242"), "{note}");
     }
 
     fn node(index: u32, bounds: Option<Bounds>) -> AccessibilityNode {
