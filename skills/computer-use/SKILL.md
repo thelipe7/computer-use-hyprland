@@ -173,6 +173,13 @@ in a plain container is not in the tree at all, so `wait_for(text=...)` times
 out on text that is plainly on screen. Read those by `screenshot` with a
 `region` instead, and keep the tree for the controls.
 
+What the tree says about those controls also stops sooner than it looks.
+`focusable`, `selectable`, `selected` and an element's click action arrive;
+`expanded` does not, and a node carries no hierarchy level and no sort
+direction — there are no such fields to carry them. So a live check on Linux
+can prove that something holds focus or is selected, and cannot prove that a
+disclosure is open or a column is sorted. Those are questions for pixels.
+
 ## Screenshots
 
 `screenshot` returns a bounded image by default, because an unbounded desktop
