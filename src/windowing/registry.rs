@@ -1,5 +1,7 @@
 use crate::windowing::backends::hyprland;
-use crate::windowing::types::{WindowInfo, WindowOcclusion, WorkspaceChange, WorkspaceTarget};
+use crate::windowing::types::{
+    WindowInfo, WindowOcclusion, WindowWorkspaceMove, WorkspaceChange, WorkspaceTarget,
+};
 use anyhow::{Result, anyhow};
 
 pub use hyprland::{HYPRLAND_BACKEND, HyprlandRelease, MINIMUM_HYPRLAND_RELEASE};
@@ -49,6 +51,16 @@ pub async fn focused_window() -> Result<Option<WindowInfo>> {
 /// Move the view to another workspace, reporting the one it left.
 pub async fn focus_workspace(target: WorkspaceTarget) -> Result<WorkspaceChange> {
     hyprland::focus_workspace(target).await
+}
+
+/// Move one window to another workspace, taking the view with it when
+/// `follow` is set.
+pub async fn move_window_to_workspace(
+    window: &WindowInfo,
+    target: WorkspaceTarget,
+    follow: bool,
+) -> Result<WindowWorkspaceMove> {
+    hyprland::move_window_to_workspace(window.window_id, target, follow).await
 }
 
 pub async fn move_window(window: &WindowInfo, x: i32, y: i32) -> Result<String> {

@@ -187,6 +187,14 @@ pub struct WorkspaceChange {
     pub current: WorkspaceSummary,
 }
 
+/// Where a window was and where it ended up, and what the view did.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct WindowWorkspaceMove {
+    pub view: WorkspaceChange,
+    pub from: Option<i32>,
+    pub to: Option<i32>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::WorkspaceTarget;

@@ -1944,6 +1944,7 @@ impl ComputerUseLinux {
                 implemented: true,
                 workspace: None,
                 previous_workspace: None,
+                window: None,
                 message,
                 received: received.clone(),
             })
@@ -1969,11 +1970,102 @@ impl ComputerUseLinux {
                     implemented: true,
                     workspace: Some(change.current),
                     previous_workspace: Some(change.previous),
+                    window: None,
                     message,
                     received,
                 })
             }
             Err(error) => failure(format!("Could not show {}: {error:#}", target.describe())),
+        }
+    }
+
+    #[tool(
+        name = "move_window_to_workspace",
+        description = "Move one window to another workspace. `workspace` is a workspace id -- the number list_windows reports for every window -- or \"empty\" for the first workspace with nothing on it. `follow` (default true) takes the view along, which is what driving that window afterwards needs: screenshots and pointer input only reach the visible workspace. Use it to give an application already running a workspace of its own; the result names the workspace the view came from, so it can be put back.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn move_window_to_workspace(
+        &self,
+        Parameters(params): Parameters<MoveWindowToWorkspaceParams>,
+    ) -> Json<WorkspaceOutput> {
+        let received = Some(serde_json::json!(params.clone()));
+        let failure = |message: String| {
+            Json(WorkspaceOutput {
+                ok: false,
+                implemented: true,
+                workspace: None,
+                previous_workspace: None,
+                window: None,
+                message,
+                received: received.clone(),
+            })
+        };
+        let target = match WorkspaceTarget::parse(&params.workspace) {
+            Ok(target) => target,
+            Err(error) => return failure(format!("{error:#}")),
+        };
+        let follow = params.follow.unwrap_or(true);
+        let window_target = params.target.clone().into_target();
+        let _input_lease = match self
+            .input_gate("move_window_to_workspace", Some(&window_target))
+            .await
+        {
+            Ok(lease) => lease,
+            Err(message) => return failure(message),
+        };
+        let windows = match list_windows().await {
+            Ok(windows) => windows,
+            Err(error) => return failure(format!("Window listing failed: {error:#}")),
+        };
+        let window = match resolve_window_target(&windows, &window_target) {
+            Ok(window) => window.clone(),
+            Err(error) => return failure(format!("{error:#}")),
+        };
+        let window_id = window.window_id;
+        match registry::move_window_to_workspace(&window, target, follow).await {
+            Ok(moved) => {
+                let view = &moved.view;
+                let mut message = format!(
+                    "Moved window 0x{window_id:x} from workspace {} to workspace {}.",
+                    describe_workspace_id(moved.from),
+                    describe_workspace_id(moved.to)
+                );
+                if follow {
+                    let _ = write!(
+                        message,
+                        " The view followed and is on workspace {} ({} window(s)); it was on workspace {}, which is where to put it back.",
+                        view.current.id, view.current.windows, view.previous.id
+                    );
+                } else {
+                    let _ = write!(
+                        message,
+                        " The view stayed on workspace {}, so the window is not visible: screenshots and pointer input cannot reach it until a focus_workspace brings it back.",
+                        view.current.id
+                    );
+                }
+                let window = list_windows()
+                    .await
+                    .ok()
+                    .and_then(|windows| windows.into_iter().find(|w| w.window_id == window_id));
+                Json(WorkspaceOutput {
+                    ok: true,
+                    implemented: true,
+                    workspace: Some(moved.view.current),
+                    previous_workspace: Some(moved.view.previous),
+                    window,
+                    message,
+                    received,
+                })
+            }
+            Err(error) => failure(format!(
+                "Could not move window 0x{window_id:x} to {}: {error:#}",
+                target.describe()
+            )),
         }
     }
 
@@ -2408,6 +2500,21 @@ struct FocusWorkspaceParams {
     workspace: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct MoveWindowToWorkspaceParams {
+    #[serde(flatten)]
+    target: ActivateWindowParams,
+    /// The workspace to move the window to: an id (the number `list_windows`
+    /// reports for each window) or `"empty"` for the first workspace with
+    /// nothing on it.
+    workspace: String,
+    /// Take the view to that workspace with the window (default true).
+    /// Screenshots and pointer input only reach the visible workspace, so a
+    /// window sent away without the view cannot be driven until something
+    /// brings it back.
+    follow: Option<bool>,
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 struct WorkspaceOutput {
     ok: bool,
@@ -2417,6 +2524,9 @@ struct WorkspaceOutput {
     /// The workspace the view was on before the call, so a caller can put it
     /// back where it found it.
     previous_workspace: Option<WorkspaceSummary>,
+    /// The window that was moved, as the compositor reports it afterwards.
+    /// Only `move_window_to_workspace` fills this in.
+    window: Option<WindowInfo>,
     message: String,
     #[schemars(skip)]
     received: Option<serde_json::Value>,
@@ -4383,6 +4493,11 @@ fn normalize_text(value: &str) -> String {
 
 /// An element in the terms the tree shows it: its role, and its name when it
 /// has one.
+/// A workspace id the compositor reported, or a word for one it did not.
+fn describe_workspace_id(workspace: Option<i32>) -> String {
+    workspace.map_or_else(|| "unknown".to_string(), |id| id.to_string())
+}
+
 fn describe_cached_node(node: &AccessibilityNode) -> String {
     match trimmed_nonempty(node.name.as_deref()) {
         Some(name) => format!("{} {name:?}", node.role),

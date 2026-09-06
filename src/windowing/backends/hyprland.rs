@@ -2,7 +2,8 @@ use crate::command_runner;
 use crate::terminal::enrich_terminal_windows;
 use crate::windowing::registry::BackendProbe;
 use crate::windowing::types::{
-    WindowBounds, WindowInfo, WindowOcclusion, WorkspaceChange, WorkspaceSummary, WorkspaceTarget,
+    WindowBounds, WindowInfo, WindowOcclusion, WindowWorkspaceMove, WorkspaceChange,
+    WorkspaceSummary, WorkspaceTarget,
 };
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -316,8 +317,46 @@ pub async fn focus_workspace(target: WorkspaceTarget) -> Result<WorkspaceChange>
     Ok(WorkspaceChange { previous, current })
 }
 
+/// Move one window to another workspace. With `follow`, the view goes with it
+/// -- which is what a caller acting on that window afterwards needs, because
+/// a screenshot only captures the visible workspace and the pointer only
+/// reaches it.
+pub async fn move_window_to_workspace(
+    window_id: u64,
+    target: WorkspaceTarget,
+    follow: bool,
+) -> Result<WindowWorkspaceMove> {
+    let previous_view = active_workspace().await?;
+    let from = client_workspace(&query_client(window_id).await?);
+    run_lua_dispatch(&lua_window_workspace_dispatch(window_id, target, follow)).await?;
+    let moved = wait_for_client(window_id, |client| {
+        client_workspace(client).is_some_and(|workspace| target.reached(workspace, from))
+    })
+    .await?;
+    Ok(WindowWorkspaceMove {
+        view: WorkspaceChange {
+            previous: previous_view,
+            current: active_workspace().await?,
+        },
+        from,
+        to: client_workspace(&moved),
+    })
+}
+
+fn client_workspace(client: &HyprlandClient) -> Option<i32> {
+    client.workspace.as_ref().and_then(|workspace| workspace.id)
+}
+
 fn lua_workspace_focus_dispatch(target: WorkspaceTarget) -> String {
     format!("hl.dsp.focus({{ workspace = {} }})", target.lua_value())
+}
+
+fn lua_window_workspace_dispatch(window_id: u64, target: WorkspaceTarget, follow: bool) -> String {
+    format!(
+        "hl.dsp.window.move({{ window = \"{}\", workspace = {}, follow = {follow} }})",
+        window_address(window_id),
+        target.lua_value()
+    )
 }
 
 async fn wait_for_active_workspace(
