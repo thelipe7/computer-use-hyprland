@@ -143,45 +143,84 @@ pub fn resolve_window_target<'a>(
     }
 
     if let Some(app_id) = normalized_target(target.app_id.as_deref()) {
-        if let Some(window) = windows.iter().find(|window| {
-            window
-                .app_id
-                .as_deref()
-                .is_some_and(|value| value.eq_ignore_ascii_case(&app_id))
-        }) {
-            return Ok(window);
-        }
-        bail!("No window matched app_id {app_id}.");
+        let matches = windows
+            .iter()
+            .filter(|window| {
+                window
+                    .app_id
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case(&app_id))
+            })
+            .collect::<Vec<_>>();
+        return unique_window_match(&matches, &format!("app_id {app_id}"));
     }
 
     if let Some(wm_class) = normalized_target(target.wm_class.as_deref()) {
-        if let Some(window) = windows.iter().find(|window| {
-            window
-                .wm_class
-                .as_deref()
-                .is_some_and(|value| value.eq_ignore_ascii_case(&wm_class))
-        }) {
-            return Ok(window);
-        }
-        bail!("No window matched wm_class {wm_class}.");
+        let matches = windows
+            .iter()
+            .filter(|window| {
+                window
+                    .wm_class
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case(&wm_class))
+            })
+            .collect::<Vec<_>>();
+        return unique_window_match(&matches, &format!("wm_class {wm_class}"));
     }
 
     if let Some(title) = normalized_target(target.title.as_deref()) {
-        let title_lower = title.to_ascii_lowercase();
-        if let Some(window) = windows.iter().find(|window| {
-            window
-                .title
-                .as_deref()
-                .is_some_and(|value| value.to_ascii_lowercase().contains(&title_lower))
-        }) {
-            return Ok(window);
-        }
-        bail!("No window title contained {title}.");
+        return resolve_title_target(windows, &title);
     }
 
     bail!(
         "Pass window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd to target a window."
     );
+}
+
+/// Resolve a `title` selector through three narrowing passes: the windows
+/// whose title *is* it, then the ones whose title is it but for letter case,
+/// then the ones that merely contain it. The first pass with anything in it
+/// decides.
+///
+/// That ladder is what keeps a window named "Sophia" reachable by that name
+/// while an editor two workspaces away carries "sophia" in a project title —
+/// two windows a case-insensitive match cannot tell apart. When the deciding
+/// pass still holds more than one window the selector refuses and names them,
+/// the way an ambiguous element selector does: driving the wrong window is
+/// worse than answering a question.
+fn resolve_title_target<'a>(windows: &'a [WindowInfo], title: &str) -> Result<&'a WindowInfo> {
+    let needle = title.to_ascii_lowercase();
+    let titles = |predicate: fn(&str, &str) -> bool| {
+        windows
+            .iter()
+            .filter(|window| {
+                window
+                    .title
+                    .as_deref()
+                    .is_some_and(|value| predicate(value.trim(), title))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let description = format!("title {title}");
+    let exact = titles(|value, title| value == title);
+    if !exact.is_empty() {
+        return unique_window_match(&exact, &description);
+    }
+    let same_but_for_case = titles(str::eq_ignore_ascii_case);
+    if !same_but_for_case.is_empty() {
+        return unique_window_match(&same_but_for_case, &description);
+    }
+    let contains = windows
+        .iter()
+        .filter(|window| {
+            window
+                .title
+                .as_deref()
+                .is_some_and(|value| value.to_ascii_lowercase().contains(&needle))
+        })
+        .collect::<Vec<_>>();
+    unique_window_match(&contains, &description)
 }
 
 fn resolve_window_id_target<'a>(
@@ -267,16 +306,33 @@ fn unique_window_match<'a>(
         [window] => Ok(*window),
         [] => bail!("No window matched {description}."),
         windows => {
-            let ids = windows
-                .iter()
-                .map(|window| window.window_id.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
             bail!(
-                "{description} matched multiple windows ({ids}); add window_id, tty, title, or terminal_command to disambiguate."
+                "{description} matched multiple windows ({}); add window_id or another selector to disambiguate.",
+                describe_windows(windows)
             );
         }
     }
+}
+
+/// The windows an ambiguous selector matched, in the terms the caller can
+/// pick one by.
+fn describe_windows(windows: &[&WindowInfo]) -> String {
+    windows
+        .iter()
+        .map(|window| {
+            format!(
+                "window_id {} {:?} [{}]",
+                window.window_id,
+                window.title.as_deref().unwrap_or(""),
+                window
+                    .app_id
+                    .as_deref()
+                    .or(window.wm_class.as_deref())
+                    .unwrap_or("unknown app")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn window_matches_terminal_target(window: &WindowInfo, target: &WindowTarget) -> bool {
@@ -396,6 +452,104 @@ fn same_optional_string(left: Option<&str>, right: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn window(window_id: u64, title: &str, app_id: &str) -> WindowInfo {
+        WindowInfo {
+            window_id,
+            title: Some(title.to_string()),
+            app_id: Some(app_id.to_string()),
+            wm_class: Some(app_id.to_string()),
+            pid: Some(u32::try_from(window_id).unwrap_or(1)),
+            bounds: None,
+            workspace: None,
+            focused: false,
+            hidden: false,
+            client_type: None,
+            backend: "test".to_string(),
+            terminal: None,
+        }
+    }
+
+    fn title_target(title: &str) -> WindowTarget {
+        WindowTarget {
+            title: Some(title.to_string()),
+            ..WindowTarget::default()
+        }
+    }
+
+    #[test]
+    fn an_exact_title_wins_over_a_window_that_merely_contains_it() {
+        let windows = vec![
+            window(1, "sophia", "jetbrains-rustrover"),
+            window(2, "Sophia", "sophia-desktop"),
+        ];
+
+        let resolved = resolve_window_target(&windows, &title_target("Sophia")).unwrap();
+
+        assert_eq!(resolved.window_id, 2);
+    }
+
+    #[test]
+    fn two_titles_that_differ_only_by_case_refuse_the_ambiguous_one() {
+        let windows = vec![
+            window(1, "sophia", "jetbrains-rustrover"),
+            window(2, "Sophia", "sophia-desktop"),
+        ];
+
+        let error = resolve_window_target(&windows, &title_target("SOPHIA"))
+            .expect_err("neither title is the one that was asked for")
+            .to_string();
+
+        assert!(error.contains("window_id 1"), "{error}");
+        assert!(error.contains("window_id 2"), "{error}");
+    }
+
+    #[test]
+    fn a_title_matching_two_windows_refuses_and_names_them() {
+        let windows = vec![
+            window(1, "sophia – src/main.rs", "jetbrains-rustrover"),
+            window(2, "sophia desktop", "sophia-desktop"),
+        ];
+
+        let error = resolve_window_target(&windows, &title_target("sophia"))
+            .expect_err("an ambiguous title must not pick one silently")
+            .to_string();
+
+        assert!(error.contains("window_id 1"), "{error}");
+        assert!(error.contains("window_id 2"), "{error}");
+        assert!(error.contains("jetbrains-rustrover"), "{error}");
+    }
+
+    #[test]
+    fn two_windows_of_one_app_refuse_an_app_id_selector() {
+        let windows = vec![
+            window(1, "left terminal", "com.mitchellh.ghostty"),
+            window(2, "right terminal", "com.mitchellh.ghostty"),
+        ];
+        let target = WindowTarget {
+            app_id: Some("com.mitchellh.ghostty".to_string()),
+            ..WindowTarget::default()
+        };
+
+        let error = resolve_window_target(&windows, &target)
+            .expect_err("two windows of one app must not resolve to the first")
+            .to_string();
+
+        assert!(error.contains("app_id com.mitchellh.ghostty"), "{error}");
+        assert!(error.contains("window_id"), "{error}");
+    }
+
+    #[test]
+    fn a_title_that_matches_one_window_still_resolves() {
+        let windows = vec![
+            window(1, "sophia", "jetbrains-rustrover"),
+            window(2, "Aprenda Rust", "google-chrome"),
+        ];
+
+        let resolved = resolve_window_target(&windows, &title_target("rust")).unwrap();
+
+        assert_eq!(resolved.window_id, 2);
+    }
 
     #[test]
     fn focus_verification_allows_workspace_transition_latency() {
