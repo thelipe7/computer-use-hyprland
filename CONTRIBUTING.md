@@ -215,17 +215,18 @@ and the release notes say what a client has to change.
 
 ## Releasing
 
-A release is a thing somebody sits down and does. Four steps, in this order:
+A release is a thing somebody sits down and does. Five steps, in this order:
 
 1. Bump `version` in `Cargo.toml` and the `version` literal in the
    `tool_handler` attribute in `src/server.rs`. The contract check fails if
    they disagree.
-2. Run the whole of [Verification](#verification), plus
+2. Remove the temporary `publish = false` from `Cargo.toml`.
+3. Run the whole of [Verification](#verification), plus
    `cargo publish --dry-run` and `cargo package --list`, and read the file
    list: the package should carry the sources, the manifest, the license and
    the README, and nothing else.
-3. Tag the commit and push the tag.
-4. `cargo publish`.
+4. Tag the commit and push the tag.
+5. `cargo publish`.
 
 Publishing is irreversible. A version can be yanked, which stops new
 dependents from resolving it, and cannot be deleted or replaced.

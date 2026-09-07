@@ -6,7 +6,6 @@ An MCP server that lets an agent drive a Hyprland desktop: read the
 accessibility tree, take screenshots, target windows, and send input.
 
 [![CI](https://img.shields.io/github/actions/workflow/status/thelipe7/computer-use-hyprland/ci.yml?branch=main&label=CI&style=flat-square)](https://github.com/thelipe7/computer-use-hyprland/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/computer-use-hyprland?style=flat-square)](https://crates.io/crates/computer-use-hyprland)
 [![MSRV](https://img.shields.io/badge/rust-1.98.1-blue?style=flat-square)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
@@ -55,19 +54,15 @@ capture fails.
 
 ## Install
 
-From the registry:
-
-```bash
-cargo install computer-use-hyprland
-```
-
-Or from a clone, which is what you want if you are changing it:
+This project is not published to crates.io yet. Install it from a clone:
 
 ```bash
 git clone https://github.com/thelipe7/computer-use-hyprland
 cd computer-use-hyprland
 cargo install --path .
 ```
+
+Registry installation will be documented here after the first release.
 
 The pinned toolchain in `rust-toolchain.toml` installs itself on the first
 `cargo` command. An MCP client's server process does not reload the binary, so

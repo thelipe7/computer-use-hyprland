@@ -1,6 +1,7 @@
 [package]
 name = "computer-use-hyprland"
 version = "0.1.0"
+publish = false
 edition = "2024"
 # The floor is the toolchain `rust-toolchain.toml` pins, because that is the
 # only compiler anything here is built or tested with. A lower number would
